@@ -9,6 +9,7 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
+from src.image_source import SyntheticImageSource
 from src.db import init_schema, make_engine
 from src.ocr import MockOCRAdapter
 from src.router import UnstrictFIFORouter, StrictFIFORouter
@@ -29,7 +30,7 @@ def run(router, seed=0):
         router=router,
         ocr=MockOCRAdapter(error_rate=0.05, rng=random.Random(seed)),
         engine=engine,
-        image_generator=ContainerImageGenerator(rng=random.Random(seed)),
+        image_source=SyntheticImageSource(ContainerImageGenerator(rng=random.Random(seed))),
         fast_mode=True,
     )
     return sim.run()

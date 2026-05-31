@@ -238,39 +238,260 @@ def _edit_distance(a: str, b: str) -> int:
     return sum(1 for x, y in zip(a, b) if x != y)
 
 
-# --- Real implementation (stub; populated when we plug in your models) ---
+# --- Real implementation: CCLN + PaddleOCR ---
 
 class RealOCRAdapter(OCRAdapter):
-    """Wraps the trained two-stage pipeline: detector + transcriber.
+    """Two-stage pipeline: CCLN bounding-box detection + PaddleOCR recognition.
 
-    Loaded once at startup; predict() runs both models. The actual model
-    loading and inference code goes in __init__ and predict() when we
-    integrate your weights — currently this is a placeholder that raises.
+    Loads both models once at construction. predict() runs them in sequence on
+    a single image. The adapter accepts ndarray (the existing OCRAdapter
+    contract) and converts internally, so the simulator interface is unchanged.
+
+    Recovery: this adapter uses the OCR-confusion-aware substitution recovery
+    from your existing predict_paddle.py pipeline (correct_to_valid_iso6346),
+    not the beam-search recovery in iso6346.py. PaddleOCR doesn't expose
+    per-character probability distributions, so distribution-guided recovery
+    is not applicable to this pipeline.
     """
 
     def __init__(
         self,
-        detector_weights_path: str,
-        transcriber_weights_path: str,
+        ccln_weights_path: str = "models/ccln.pth",
+        *,
         device: str = "cpu",
-        char_list: Optional[list[str]] = None,
+        paddle_gpu: bool = False,
+        use_localization: bool = True,
+        try_rotations: bool = True,
     ):
-        self._detector_path = detector_weights_path
-        self._transcriber_path = transcriber_weights_path
-        self._device = device
-        self._char_list = char_list or STANDARD_CHAR_LIST
+        """
+        Args:
+            ccln_weights_path: path to the CCLN .pth weights.
+            device: 'cpu' or 'cuda' for CCLN.
+            paddle_gpu: True to run PaddleOCR on GPU.
+            use_localization: if False, skip CCLN and pass the whole image to
+                PaddleOCR. Useful when input is already a tight crop or when
+                CCLN's training distribution doesn't match input (e.g.,
+                synthetic images).
+            try_rotations: if True, try 0/90/180/270° and pick the best.
+                Slower but recovers vertical/upside-down codes.
+        """
+        # Imports are local because torch/paddle are heavy and we only want
+        # to pay the import cost when the real adapter is actually used.
+        import os
+        # Paddle 3.x crashes with the new PIR executor + oneDNN; disable both
+        # before importing paddle.
+        os.environ.setdefault("FLAGS_use_mkldnn", "0")
+        os.environ.setdefault("FLAGS_enable_pir_in_executor", "0")
+        os.environ.setdefault("FLAGS_enable_pir_api", "0")
 
-        # TODO (Component 4.5): load your two models here.
-        # self._detector = load_detector(detector_weights_path, device)
-        # self._transcriber = load_transcriber(transcriber_weights_path, device)
-        raise NotImplementedError(
-            "RealOCRAdapter is a stub. Implementation will be added when "
-            "model weights are integrated (Component 4.5)."
-        )
+        import torch
+        from src.CCLN import load_ccln
+
+        self._device = torch.device(device)
+        self._ccln = load_ccln(ccln_weights_path, self._device)
+        self._paddle = self._init_paddle(paddle_gpu)
+        self._use_localization = use_localization
+        self._try_rotations = try_rotations
+        self._ccln_weights_path = ccln_weights_path
 
     @property
     def name(self) -> str:
-        return f"RealOCRAdapter(device={self._device})"
+        loc = "with_loc" if self._use_localization else "no_loc"
+        rot = "rot" if self._try_rotations else "norot"
+        return f"RealOCRAdapter({self._device}, {loc}, {rot})"
 
-    def predict(self, image: np.ndarray) -> OCRResult:
-        raise NotImplementedError("See __init__ TODO.")
+    @staticmethod
+    def _init_paddle(use_gpu: bool):
+        from paddleocr import PaddleOCR
+        return PaddleOCR(
+            lang="en",
+            use_textline_orientation=True,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            device="gpu" if use_gpu else "cpu",
+            enable_mkldnn=False,
+            text_recognition_model_name="PP-OCRv5_server_rec",
+            text_det_thresh=0.2,
+            text_det_box_thresh=0.4,
+            text_det_unclip_ratio=2.0,
+        )
+
+    def predict(self, image) -> OCRResult:
+        """Run the full pipeline on one image.
+
+        Args:
+            image: PIL.Image.Image (preferred) or (H, W, 3) uint8 ndarray.
+                The adapter accepts both for compatibility — PIL is preferred
+                because that's how real images are loaded; ndarray is kept
+                for synthetic-image fallback.
+        """
+        import time
+        from PIL import Image as PILImage
+
+        start = time.perf_counter()
+
+        # Normalize input to PIL.
+        if isinstance(image, np.ndarray):
+            pil = PILImage.fromarray(image)
+        elif isinstance(image, PILImage.Image):
+            pil = image
+        else:
+            raise TypeError(f"Unsupported image type: {type(image)}")
+
+        # Stage 1: localization (optional).
+        bbox_px, crop = self._localize_and_crop(pil)
+
+        # Stage 2: recognition with rotation search.
+        code, valid, fragments, rotation = self._recognize(crop)
+
+        # Build OCRResult. We don't have per-position distributions from
+        # PaddleOCR, so several fields stay None.
+        bbox = BoundingBox(
+            x=bbox_px[0],
+            y=bbox_px[1],
+            width=bbox_px[2] - bbox_px[0],
+            height=bbox_px[3] - bbox_px[1],
+            confidence=1.0,        # CCLN doesn't return a confidence
+        )
+
+        # Mean fragment confidence as a confidence proxy.
+        mean_conf = (
+            sum(c for _, c in fragments) / len(fragments)
+            if fragments
+            else 0.0
+        )
+
+        latency_ms = (time.perf_counter() - start) * 1000.0
+        return OCRResult(
+            raw_string=code,
+            distributions=None,           # PaddleOCR doesn't expose these
+            char_list=STANDARD_CHAR_LIST,
+            bounding_box=bbox,
+            recovered_code=code if valid else None,
+            is_valid=valid,
+            recovery_edits=None,          # adapter doesn't track this granularly
+            log_probability=float(np.log(mean_conf)) if mean_conf > 0 else None,
+            latency_ms=latency_ms,
+        )
+
+    # ---- internals (port of predict_paddle.py logic, adapted for in-process use) ----
+
+    def _localize_and_crop(self, pil):
+        """Run CCLN to crop the code region. Returns (bbox_pixels, cropped_pil)."""
+        if not self._use_localization:
+            W, H = pil.size
+            return (0, 0, W, H), pil
+        bbox_px = self._localize(pil)
+        return bbox_px, pil.crop(bbox_px)
+
+    def _localize(self, pil, pad_frac=0.08):
+        import torch
+        from src.CCLN import CCLN_TRANSFORM
+
+        W, H = pil.size
+        with torch.no_grad():
+            tensor = CCLN_TRANSFORM(pil).unsqueeze(0).to(self._device)
+            bbox = self._ccln(tensor).squeeze(0).cpu().numpy()
+
+        x1, y1, x2, y2 = bbox
+        x1, x2 = sorted([max(0.0, min(1.0, x1)), max(0.0, min(1.0, x2))])
+        y1, y2 = sorted([max(0.0, min(1.0, y1)), max(0.0, min(1.0, y2))])
+
+        # Extra horizontal padding for vertical codes.
+        w = x2 - x1
+        h = y2 - y1
+        is_vertical = h > w * 1.5
+        pad_x = pad_frac * 4 if is_vertical else pad_frac
+        pad_y = pad_frac
+        x1 = max(0.0, x1 - w * pad_x)
+        x2 = min(1.0, x2 + w * pad_x)
+        y1 = max(0.0, y1 - h * pad_y)
+        y2 = min(1.0, y2 + h * pad_y)
+        return int(x1 * W), int(y1 * H), int(x2 * W), int(y2 * H)
+
+    def _recognize(self, crop_pil):
+        rotations = [0, 90, 180, 270] if self._try_rotations else [0]
+        best = ("", False, [], 0, -1.0)
+
+        for rot in rotations:
+            rotated = crop_pil if rot == 0 else crop_pil.rotate(rot, expand=True)
+            fragments = self._ocr_one(rotated)
+            code, valid, score = self._best_from_fragments(fragments)
+            if score > best[4]:
+                best = (code, valid, fragments, rot, score)
+            if valid:
+                break
+
+        return best[0], best[1], best[2], best[3]
+
+    def _ocr_one(self, crop_pil):
+        arr = np.array(crop_pil)
+        if hasattr(self._paddle, "predict"):
+            raw = self._paddle.predict(arr)
+        else:
+            raw = self._paddle.ocr(arr, cls=True)
+        return list(_flatten_paddle_result(raw))
+
+    @staticmethod
+    def _best_from_fragments(fragments):
+        from .iso6346_recovery import (
+            correct_to_valid_iso6346,
+            is_valid_container_code,
+            CONTAINER_RE,
+        )
+        import re
+
+        cleaned = [(re.sub(r"[^A-Z0-9]", "", t.upper()), c) for t, c in fragments]
+        cleaned = [(t, c) for t, c in cleaned if t]
+        if not cleaned:
+            return ("", False, 0.0)
+
+        joined = "".join(t for t, _ in cleaned)
+        mean_conf = sum(c for _, c in cleaned) / len(cleaned)
+
+        candidates = []
+        for t, _ in cleaned:
+            for m in CONTAINER_RE.finditer(t):
+                candidates.append(m.group())
+        for m in CONTAINER_RE.finditer(joined):
+            candidates.append(m.group())
+
+        # Tier 1: any regex hit that already passes ISO 6346.
+        for code in candidates:
+            if is_valid_container_code(code):
+                return (code, True, 1000.0 + mean_conf)
+
+        # Tier 1.5: OCR-confusion correction.
+        for code in candidates:
+            corrected = correct_to_valid_iso6346(code)
+            if corrected:
+                return (corrected, True, 900.0 + mean_conf)
+
+        if len(joined) >= 11:
+            for i in range(len(joined) - 10):
+                corrected = correct_to_valid_iso6346(joined[i : i + 11])
+                if corrected:
+                    return (corrected, True, 800.0 + mean_conf)
+
+        # Tier 2: regex match without check digit.
+        if candidates:
+            return (candidates[0], False, mean_conf)
+
+        # Tier 3: longest cleaned fragment.
+        return (max((t for t, _ in cleaned), key=len), False, mean_conf * 0.1)
+
+
+def _flatten_paddle_result(result):
+    """Yield (text, confidence). Handles PaddleOCR 2.x and 3.x output shapes."""
+    if not result:
+        return
+    first = result[0]
+    if isinstance(first, dict):
+        for text, score in zip(first.get("rec_texts", []), first.get("rec_scores", [])):
+            yield text, float(score)
+    else:
+        for line in first or []:
+            if not line:
+                continue
+            text, conf = line[1]
+            yield text, float(conf)

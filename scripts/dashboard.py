@@ -1,0 +1,267 @@
+"""Live operator dashboard for the depot traffic management system.
+
+Reads from the SQLite database the simulator writes to. Displays:
+  - waiting queue
+  - per-gate status with current truck and live "camera feed"
+  - recent container reads (raw vs recovered codes; recovery flagged)
+  - per-gate throughput chart
+
+Run with:
+    streamlit run scripts/dashboard.py
+"""
+
+import sys
+import time
+from pathlib import Path
+
+current_dir = Path(__file__).resolve().parent
+root_dir = current_dir.parent
+
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
+
+import pandas as pd
+import streamlit as st
+
+from sqlalchemy import select, text
+from src.dashboard_io import read_gate_frame
+from src.db import containers, events, gate_throughput, make_engine
+
+
+DB_URL = "sqlite:///depot_live.db"
+GATE_IDS = ["A", "B", "C"]
+REFRESH_INTERVAL_S = 1.0   # how often Streamlit re-runs the script
+
+
+# --- Streamlit page setup ---
+
+st.set_page_config(
+    page_title="Depot Live",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+st.markdown(
+    """
+    <style>
+    .stMetric { background-color: #1e1e1e; padding: 10px; border-radius: 5px; }
+    .small-font { font-size: 0.85em; color: #888; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# --- Data access ---
+
+@st.cache_resource
+def get_engine():
+    """One engine per Streamlit session, reused across reruns."""
+    return make_engine(DB_URL)
+
+
+def fetch_waiting(engine) -> pd.DataFrame:
+    sql = (
+        "SELECT id, plate, arrived_at, "
+        "       (strftime('%s','now') - arrived_at) AS waited_s "
+        "FROM events WHERE status='waiting' ORDER BY arrived_at"
+    )
+    with engine.begin() as conn:
+        df = pd.read_sql_query(text(sql), conn)
+    return df
+
+
+def fetch_at_gate(engine) -> pd.DataFrame:
+    sql = (
+        "SELECT plate, assigned_gate, assigned_at, routing_reason "
+        "FROM events WHERE status='at_gate' ORDER BY assigned_at"
+    )
+    with engine.begin() as conn:
+        df = pd.read_sql_query(text(sql), conn)
+    return df
+
+
+def fetch_recent_containers(engine, limit=20) -> pd.DataFrame:
+    sql = f"""
+        SELECT c.recorded_at, e.plate, e.assigned_gate AS gate,
+               c.raw_code, c.recovered_code, c.is_valid, c.recovery_edits
+        FROM containers c
+        JOIN events e ON c.event_id = e.id
+        ORDER BY c.recorded_at DESC
+        LIMIT {limit}
+    """
+    with engine.begin() as conn:
+        df = pd.read_sql_query(text(sql), conn)
+    return df
+
+
+def fetch_throughput_summary(engine, window_seconds=600) -> pd.DataFrame:
+    sql = f"""
+        SELECT gate_id, SUM(trucks_served) AS trucks, AVG(mean_service_time) AS avg_service
+        FROM gate_throughput
+        WHERE window_start >= (strftime('%s','now') - {window_seconds})
+        GROUP BY gate_id
+        ORDER BY gate_id
+    """
+    with engine.begin() as conn:
+        df = pd.read_sql_query(text(sql), conn)
+    return df
+
+
+def fetch_throughput_history(engine, minutes=30) -> pd.DataFrame:
+    sql = f"""
+        SELECT window_start, gate_id, trucks_served
+        FROM gate_throughput
+        WHERE window_start >= (strftime('%s','now') - {minutes * 60})
+        ORDER BY window_start
+    """
+    with engine.begin() as conn:
+        df = pd.read_sql_query(text(sql), conn)
+    if not df.empty:
+        df["minute"] = pd.to_datetime(df["window_start"], unit="s")
+    return df
+
+
+# --- UI ---
+
+st.title("🚛 Depot Traffic Management — Live")
+
+engine = get_engine()
+
+# Try to read data; gracefully handle missing DB.
+try:
+    waiting = fetch_waiting(engine)
+    at_gate = fetch_at_gate(engine)
+    recent = fetch_recent_containers(engine)
+    tp_summary = fetch_throughput_summary(engine)
+    tp_history = fetch_throughput_history(engine)
+except Exception as e:
+    st.error(
+        f"Cannot read database `{DB_URL}`. Is the simulator running?\n\n"
+        f"Start it with: `python scripts/run_realtime_sim.py`\n\nError: {e}"
+    )
+    st.stop()
+
+
+# --- Top metrics row ---
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Waiting trucks", len(waiting))
+col2.metric("At gate", len(at_gate))
+col3.metric(
+    "Avg wait",
+    f"{waiting['waited_s'].mean():.0f}s" if not waiting.empty else "—",
+)
+col4.metric(
+    "Throughput (10 min)",
+    int(tp_summary["trucks"].sum()) if not tp_summary.empty else 0,
+)
+
+
+# --- Gate strip with live camera feeds ---
+
+st.subheader("Gates")
+gate_cols = st.columns(3)
+for col, gate_id in zip(gate_cols, GATE_IDS):
+    with col:
+        st.markdown(f"**Gate {gate_id}**")
+        # Camera frame. Wrapped in try/except because even with atomic writes,
+        # extremely fast refresh + slow disk could in principle produce a
+        # partial read, and PIL is unforgiving about truncated PNGs.
+        frame_bytes = read_gate_frame(gate_id)
+        if frame_bytes:
+            try:
+                st.image(frame_bytes, width="stretch")
+            except (OSError, Exception):
+                st.markdown(
+                    "<div style='background:#222; height:120px; display:flex; "
+                    "align-items:center; justify-content:center; color:#888; "
+                    "border-radius:6px;'>— refreshing... —</div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.markdown(
+                "<div style='background:#222; height:120px; display:flex; "
+                "align-items:center; justify-content:center; color:#666; "
+                "border-radius:6px;'>— no frame yet —</div>",
+                unsafe_allow_html=True,
+            )
+        # Current occupant.
+        current = at_gate[at_gate["assigned_gate"] == gate_id]
+        if not current.empty:
+            row = current.iloc[0]
+            st.markdown(f"🚛 **{row['plate']}**")
+            st.caption(row["routing_reason"] or "—")
+        else:
+            st.markdown("_idle_")
+
+        # Per-gate stats.
+        stats = tp_summary[tp_summary["gate_id"] == gate_id]
+        if not stats.empty:
+            r = stats.iloc[0]
+            avg_s = r["avg_service"] if r["avg_service"] is not None else 0
+            st.caption(f"served (10m): **{int(r['trucks'])}** · avg service: {avg_s:.1f}s")
+
+
+# --- Two-column layout: waiting queue + recent reads ---
+
+col_left, col_right = st.columns([1, 2])
+
+with col_left:
+    st.subheader("Waiting queue")
+    if waiting.empty:
+        st.caption("Queue is empty.")
+    else:
+        display = waiting[["plate", "waited_s"]].rename(
+            columns={"plate": "Plate", "waited_s": "Waited (s)"}
+        )
+        st.dataframe(display, hide_index=True, width="stretch")
+
+with col_right:
+    st.subheader("Recent container reads")
+    if recent.empty:
+        st.caption("No reads yet.")
+    else:
+        # Format for display: show raw vs recovered to highlight recovery.
+        display = recent.copy()
+        display["recovered"] = display.apply(
+            lambda r: (
+                f"✅ {r['recovered_code']}"
+                if r["is_valid"] == 1
+                else f"❌ {r['recovered_code'] or '(unrecoverable)'}"
+            ),
+            axis=1,
+        )
+        display["edits"] = display["recovery_edits"].apply(
+            lambda x: "" if pd.isna(x) or x == 0 else f"{int(x)} edit(s)"
+        )
+        display = display[["plate", "gate", "raw_code", "recovered", "edits"]]
+        display.columns = ["Plate", "Gate", "Raw OCR", "Final", "Recovery"]
+        st.dataframe(display, hide_index=True, width="stretch")
+
+
+# --- Throughput chart ---
+
+st.subheader("Per-gate throughput (last 30 min)")
+if tp_history.empty:
+    st.caption("Not enough history yet.")
+else:
+    # Pivot for stacked chart.
+    pivot = (
+        tp_history.pivot_table(
+            index="minute", columns="gate_id", values="trucks_served", aggfunc="sum"
+        )
+        .fillna(0)
+        .sort_index()
+    )
+    st.bar_chart(pivot)
+
+
+# --- Auto-refresh ---
+
+st.caption(
+    f"Auto-refreshing every {REFRESH_INTERVAL_S}s · "
+    f"reading {DB_URL} · frames in `./frames/`"
+)
+time.sleep(REFRESH_INTERVAL_S)
+st.rerun()

@@ -19,13 +19,13 @@ if str(root_dir) not in sys.path:
 from src.db import init_schema, make_engine
 from src.ocr import MockOCRAdapter
 from src.router import StrictFIFORouter, UnstrictFIFORouter
-from src.simulation import DepotSimulation, SimulationConfig
+from src.simulation import DepotSimulation, GateConfig, SimulationConfig
 from src.synthetic_images import CLEAN, ContainerImageGenerator
 
 
 N_SEEDS = 10
-ARRIVAL_RATES = [2.0, 2.5, 3.0, 3.5, 4.0]
-DURATION = 3600   # 1 simulated hour per run
+ARRIVAL_RATES = [1.5, 1.8, 2.0, 2.2, 2.4] 
+DURATION = 7200   # 1 simulated hour per run
 
 
 def run_once(router_factory, arrival_rate, seed):
@@ -38,6 +38,11 @@ def run_once(router_factory, arrival_rate, seed):
             arrival_rate_per_minute=arrival_rate,
             seed=seed,
             image_config=CLEAN,
+            gates=(
+                GateConfig("A", mean_service_seconds=180.0, std_service_seconds=30.0),
+                GateConfig("B", mean_service_seconds=90.0,  std_service_seconds=15.0),
+                GateConfig("C", mean_service_seconds=30.0,  std_service_seconds=5.0),
+            ),
         ),
         router=router_factory(),
         ocr=MockOCRAdapter(error_rate=0.05, rng=random.Random(seed)),

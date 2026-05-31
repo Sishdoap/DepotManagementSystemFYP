@@ -23,6 +23,8 @@ from typing import Optional
 import numpy as np
 import simpy
 
+from .image_source import ImageSource
+
 from .db import (
     complete_event,
     insert_container_reading,
@@ -115,16 +117,18 @@ class DepotSimulation:
         router: Router,
         ocr: OCRAdapter,
         engine,                          # SQLAlchemy engine from db.make_engine()
-        image_generator: ContainerImageGenerator,
+        image_source: "ImageSource",      # CHANGED
         fast_mode: bool = True,
-        realtime_factor: float = 1.0,    # only used in real-time mode
+        realtime_factor: float = 1.0,  # only used in real-time mode
+        share_frames: bool = False,
     ):
         self.config = config
         self.router = router
         self.ocr = ocr
         self.engine = engine
-        self.image_generator = image_generator
+        self.image_source = image_source
         self.fast_mode = fast_mode
+        self.share_frames = share_frames
 
         # SimPy environment.
         if fast_mode:
@@ -244,10 +248,16 @@ class DepotSimulation:
                 routing_reason=decision.reason,
             )
 
-            # OCR pass. We generate a synthetic image, send it to the adapter,
-            # and persist the result. The adapter is mock-or-real transparently.
-            generated = self.image_generator.generate(self.config.image_config)
-            ocr_result: OCRResult = self.ocr.predict(generated.image)
+            sourced = self.image_source.next_image()
+            ocr_result: OCRResult = self.ocr.predict(sourced.image)
+
+            if self.share_frames:
+                from .dashboard_io import write_gate_frame
+                annotation = (
+                    f"Gate {gate_id} | {ocr_result.recovered_code or '???'}"
+                    f" | valid={ocr_result.is_valid}"
+                )
+                write_gate_frame(gate_id, np.array(sourced.image), annotation=annotation)
 
             insert_container_reading(
                 self.engine,

@@ -95,6 +95,13 @@ gate_throughput = Table(
     Index("ix_throughput_gate_window", "gate_id", "window_start", unique=True),
 )
 
+sim_state = Table(
+    "sim_state",
+    metadata,
+    Column("key", String(32), primary_key=True),
+    Column("value", Float, nullable=False),
+)
+
 
 # --- Connection management ---
 
@@ -346,6 +353,25 @@ def recent_throughput(
         ).scalar()
     trucks = float(result or 0)
     return trucks / (window_seconds / 60.0)
+
+def update_sim_clock(engine: Engine, sim_now: float) -> None:
+    """Update the simulator's current time so the dashboard can compute waits."""
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    with transaction(engine) as conn:
+        stmt = sqlite_insert(sim_state).values(key="sim_now", value=sim_now)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["key"], set_={"value": sim_now}
+        )
+        conn.execute(stmt)
+
+
+def get_sim_clock(engine: Engine) -> float | None:
+    """Read the last-recorded simulator time. Returns None if not set."""
+    with transaction(engine) as conn:
+        row = conn.execute(
+            select(sim_state.c.value).where(sim_state.c.key == "sim_now")
+        ).first()
+    return float(row.value) if row else None
 
 
 # --- Query helpers (for the dashboard) ---

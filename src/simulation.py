@@ -176,6 +176,7 @@ class DepotSimulation:
         """Run the simulation to completion and return summary stats."""
         self.env.process(self._arrival_process())
         self.env.process(self._dispatcher_process())
+        self.env.process(self._clock_writer_process())
         self.env.run(until=self.config.duration_seconds)
         return self._build_result()
 
@@ -257,7 +258,22 @@ class DepotSimulation:
                     f"Gate {gate_id} | {ocr_result.recovered_code or '???'}"
                     f" | valid={ocr_result.is_valid}"
                 )
-                write_gate_frame(gate_id, np.array(sourced.image), annotation=annotation)
+                # Pass CCLN's bbox through to the dashboard for visualization.
+                # MockOCRAdapter returns a fake bbox at (10, 10, 200, 40), which
+                # would look wrong on real images — guard with the adapter name.
+                bbox_tuple = None
+                if (
+                    ocr_result.bounding_box is not None
+                    and "Real" in self.ocr.name
+                ):
+                    bb = ocr_result.bounding_box
+                    bbox_tuple = (bb.x, bb.y, bb.width, bb.height)
+                write_gate_frame(
+                    gate_id,
+                    np.array(sourced.image),
+                    annotation=annotation,
+                    bounding_box=bbox_tuple,
+                )
 
             insert_container_reading(
                 self.engine,
@@ -357,3 +373,11 @@ class DepotSimulation:
             per_gate_utilization=utilization,
             per_gate_throughput=dict(self._gate_completion_count),
         )
+    
+    def _clock_writer_process(self):
+        """Periodically write env.now to the database so the dashboard can
+        compute correct wait times against simulated time, not wall-clock time."""
+        from .db import update_sim_clock
+        while True:
+            update_sim_clock(self.engine, self.env.now)
+            yield self.env.timeout(1.0)   # update once per simulated second

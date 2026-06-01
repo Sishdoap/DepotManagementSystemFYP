@@ -342,7 +342,7 @@ class RealOCRAdapter(OCRAdapter):
         bbox_px, crop = self._localize_and_crop(pil)
 
         # Stage 2: recognition with rotation search.
-        code, valid, fragments, rotation = self._recognize(crop)
+        code, raw_uncorrected, valid, fragments, rotation = self._recognize(crop)
 
         # Build OCRResult. We don't have per-position distributions from
         # PaddleOCR, so several fields stay None.
@@ -362,14 +362,23 @@ class RealOCRAdapter(OCRAdapter):
         )
 
         latency_ms = (time.perf_counter() - start) * 1000.0
+        
+        # Compute recovery edits: how many characters differ between the raw
+        # OCR output and the final (possibly corrected) code. Zero if no
+        # correction was needed.
+        if code and raw_uncorrected and len(code) == len(raw_uncorrected):
+            edits = sum(a != b for a, b in zip(code, raw_uncorrected))
+        else:
+            edits = None
+
         return OCRResult(
-            raw_string=code,
-            distributions=None,           # PaddleOCR doesn't expose these
+            raw_string=raw_uncorrected,     # was `code` — now correctly shows pre-recovery read
+            distributions=None,
             char_list=STANDARD_CHAR_LIST,
             bounding_box=bbox,
             recovered_code=code if valid else None,
             is_valid=valid,
-            recovery_edits=None,          # adapter doesn't track this granularly
+            recovery_edits=edits,
             log_probability=float(np.log(mean_conf)) if mean_conf > 0 else None,
             latency_ms=latency_ms,
         )
@@ -411,18 +420,20 @@ class RealOCRAdapter(OCRAdapter):
 
     def _recognize(self, crop_pil):
         rotations = [0, 90, 180, 270] if self._try_rotations else [0]
-        best = ("", False, [], 0, -1.0)
+        # Best result across rotations. Tuple is:
+        # (final_code, raw_uncorrected, valid, fragments, rotation, score)
+        best = ("", "", False, [], 0, -1.0)
 
         for rot in rotations:
             rotated = crop_pil if rot == 0 else crop_pil.rotate(rot, expand=True)
             fragments = self._ocr_one(rotated)
-            code, valid, score = self._best_from_fragments(fragments)
-            if score > best[4]:
-                best = (code, valid, fragments, rot, score)
+            code, raw_uncorrected, valid, score = self._best_from_fragments(fragments)
+            if score > best[5]:
+                best = (code, raw_uncorrected, valid, fragments, rot, score)
             if valid:
                 break
 
-        return best[0], best[1], best[2], best[3]
+        return best[0], best[1], best[2], best[3], best[4]
 
     def _ocr_one(self, crop_pil):
         arr = np.array(crop_pil)
@@ -434,7 +445,7 @@ class RealOCRAdapter(OCRAdapter):
 
     @staticmethod
     def _best_from_fragments(fragments):
-        from .iso6346_recovery import (
+        from src.iso6346_recovery import (
             correct_to_valid_iso6346,
             is_valid_container_code,
             CONTAINER_RE,
@@ -444,7 +455,7 @@ class RealOCRAdapter(OCRAdapter):
         cleaned = [(re.sub(r"[^A-Z0-9]", "", t.upper()), c) for t, c in fragments]
         cleaned = [(t, c) for t, c in cleaned if t]
         if not cleaned:
-            return ("", False, 0.0)
+            return ("", "", False, 0.0)
 
         joined = "".join(t for t, _ in cleaned)
         mean_conf = sum(c for _, c in cleaned) / len(cleaned)
@@ -456,29 +467,32 @@ class RealOCRAdapter(OCRAdapter):
         for m in CONTAINER_RE.finditer(joined):
             candidates.append(m.group())
 
+        # Use the first regex hit as the "raw" reading (what OCR saw before any
+        # correction). If no regex hit, use the joined cleaned string.
+        raw_uncorrected = candidates[0] if candidates else joined
+
         # Tier 1: any regex hit that already passes ISO 6346.
         for code in candidates:
             if is_valid_container_code(code):
-                return (code, True, 1000.0 + mean_conf)
+                return (code, raw_uncorrected, True, 1000.0 + mean_conf)
 
-        # Tier 1.5: OCR-confusion correction.
+        # Tier 1.5: OCR-confusion correction on regex matches.
         for code in candidates:
             corrected = correct_to_valid_iso6346(code)
             if corrected:
-                return (corrected, True, 900.0 + mean_conf)
+                return (corrected, raw_uncorrected, True, 900.0 + mean_conf)
 
+        # Tier 1.6: correction on the joined string.
         if len(joined) >= 11:
             for i in range(len(joined) - 10):
                 corrected = correct_to_valid_iso6346(joined[i : i + 11])
                 if corrected:
-                    return (corrected, True, 800.0 + mean_conf)
+                    return (corrected, raw_uncorrected, True, 800.0 + mean_conf)
 
-        # Tier 2: regex match without check digit.
         if candidates:
-            return (candidates[0], False, mean_conf)
+            return (candidates[0], raw_uncorrected, False, mean_conf)
 
-        # Tier 3: longest cleaned fragment.
-        return (max((t for t, _ in cleaned), key=len), False, mean_conf * 0.1)
+        return (max((t for t, _ in cleaned), key=len), raw_uncorrected, False, mean_conf * 0.1)
 
 
 def _flatten_paddle_result(result):

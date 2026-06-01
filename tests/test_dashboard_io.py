@@ -55,3 +55,21 @@ class TestFrameSharing:
         write_gate_frame("A", img, annotation="CSQU3054383 valid=True", frame_dir=tmp_frames)
         data = read_gate_frame("A", frame_dir=tmp_frames)
         assert data is not None
+
+    def test_bounding_box_drawn(self, tmp_frames):
+        img = np.zeros((100, 200, 3), dtype=np.uint8)
+        write_gate_frame(
+            "A", img,
+            annotation="GLDU4071220",
+            bounding_box=(20, 30, 80, 40),
+            frame_dir=tmp_frames,
+        )
+        data = read_gate_frame("A", frame_dir=tmp_frames)
+        assert data is not None
+        # Read it back to confirm the green rectangle exists at the expected place.
+        import io
+        from PIL import Image as PILImage
+        img_back = np.array(PILImage.open(io.BytesIO(data)))
+        # At least some pixels along the box edge should be green (0, 255, 0).
+        edge_pixels = img_back[30, 20:100]  # top edge
+        assert (edge_pixels[:, 1] > 200).any(), "expected green pixels along bbox top edge"

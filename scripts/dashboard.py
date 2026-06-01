@@ -25,7 +25,7 @@ import streamlit as st
 
 from sqlalchemy import select, text
 from src.dashboard_io import read_gate_frame
-from src.db import containers, events, gate_throughput, make_engine
+from src.db import containers, events, gate_throughput, get_sim_clock, make_engine
 
 
 DB_URL = "sqlite:///depot_live.db"
@@ -60,10 +60,10 @@ def get_engine():
     return make_engine(DB_URL)
 
 
-def fetch_waiting(engine) -> pd.DataFrame:
+def fetch_waiting(engine, sim_now: float) -> pd.DataFrame:
     sql = (
         "SELECT id, plate, arrived_at, "
-        "       (strftime('%s','now') - arrived_at) AS waited_s "
+        f"       ({sim_now} - arrived_at) AS waited_s "
         "FROM events WHERE status='waiting' ORDER BY arrived_at"
     )
     with engine.begin() as conn:
@@ -130,7 +130,8 @@ engine = get_engine()
 
 # Try to read data; gracefully handle missing DB.
 try:
-    waiting = fetch_waiting(engine)
+    sim_now = get_sim_clock(engine) or 0.0
+    waiting = fetch_waiting(engine, sim_now)
     at_gate = fetch_at_gate(engine)
     recent = fetch_recent_containers(engine)
     tp_summary = fetch_throughput_summary(engine)
@@ -222,16 +223,19 @@ with col_right:
     if recent.empty:
         st.caption("No reads yet.")
     else:
-        # Format for display: show raw vs recovered to highlight recovery.
         display = recent.copy()
-        display["recovered"] = display.apply(
-            lambda r: (
-                f"✅ {r['recovered_code']}"
-                if r["is_valid"] == 1
-                else f"❌ {r['recovered_code'] or '(unrecoverable)'}"
-            ),
-            axis=1,
-        )
+
+        def _format_final(row):
+            code = row["recovered_code"]
+            # pandas NaN is truthy; treat it the same as None.
+            if pd.isna(code) or code is None or code == "":
+                code_str = "(unrecoverable)"
+            else:
+                code_str = str(code)
+            return f"✅ {code_str}" if row["is_valid"] == 1 else f"❌ {code_str}"
+
+        display["recovered"] = display.apply(_format_final, axis=1)
+
         display["edits"] = display["recovery_edits"].apply(
             lambda x: "" if pd.isna(x) or x == 0 else f"{int(x)} edit(s)"
         )

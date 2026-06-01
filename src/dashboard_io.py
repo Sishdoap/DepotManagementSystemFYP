@@ -23,6 +23,7 @@ def write_gate_frame(
     *,
     frame_dir: Path | str = DEFAULT_FRAME_DIR,
     annotation: Optional[str] = None,
+    bounding_box: Optional[tuple[int, int, int, int]] = None,
 ) -> None:
     """Save the latest synthetic image for a gate so the dashboard can show it.
 
@@ -37,6 +38,21 @@ def write_gate_frame(
     frame_dir.mkdir(parents=True, exist_ok=True)
 
     img = Image.fromarray(image)
+
+    # Draw the bounding box first, so the annotation strip overlays it cleanly
+    # if there happens to be overlap.
+    if bounding_box is not None:
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(img)
+        x, y, w, h = bounding_box
+        # Three-pixel-wide green box. Pillow doesn't natively support "width"
+        # on rectangle outlines, so we draw concentric rectangles for thickness.
+        for offset in range(3):
+            draw.rectangle(
+                [x - offset, y - offset, x + w + offset, y + h + offset],
+                outline=(0, 255, 0),
+            )
+
     if annotation:
         from PIL import ImageDraw
         draw = ImageDraw.Draw(img)

@@ -4,5 +4,7 @@ __pycache__
 /images
 /frames
 /models
-/results
 depot_live.db
+depot_live.db-shm
+depot_live.db-wal
+.claude

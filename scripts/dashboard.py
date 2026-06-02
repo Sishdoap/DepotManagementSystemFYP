@@ -95,11 +95,12 @@ def fetch_recent_containers(engine, limit=20) -> pd.DataFrame:
     return df
 
 
-def fetch_throughput_summary(engine, window_seconds=600) -> pd.DataFrame:
+def fetch_throughput_summary(engine, sim_now: float, window_seconds=600) -> pd.DataFrame:
+    cutoff = sim_now - window_seconds
     sql = f"""
         SELECT gate_id, SUM(trucks_served) AS trucks, AVG(mean_service_time) AS avg_service
         FROM gate_throughput
-        WHERE window_start >= (strftime('%s','now') - {window_seconds})
+        WHERE window_start >= {cutoff}
         GROUP BY gate_id
         ORDER BY gate_id
     """
@@ -108,18 +109,39 @@ def fetch_throughput_summary(engine, window_seconds=600) -> pd.DataFrame:
     return df
 
 
-def fetch_throughput_history(engine, minutes=30) -> pd.DataFrame:
+def fetch_throughput_history(engine, sim_now: float, minutes=30) -> pd.DataFrame:
+    cutoff = sim_now - minutes * 60
     sql = f"""
         SELECT window_start, gate_id, trucks_served
         FROM gate_throughput
-        WHERE window_start >= (strftime('%s','now') - {minutes * 60})
+        WHERE window_start >= {cutoff}
         ORDER BY window_start
     """
     with engine.begin() as conn:
         df = pd.read_sql_query(text(sql), conn)
     if not df.empty:
-        df["minute"] = pd.to_datetime(df["window_start"], unit="s")
+        # window_start is sim seconds since sim start, not unix time.
+        # Convert to a relative "minutes ago" axis for display.
+        df["minutes_ago"] = ((sim_now - df["window_start"]) / 60.0).round(0).astype(int)
     return df
+
+def fetch_avg_wait_recent(engine, sim_now: float, window_seconds: int = 600) -> float | None:
+    """Average wait time across trucks that completed in the last window.
+
+    Wait time = assigned_at - arrived_at. We measure on completed events
+    only because those are the ones with finalized wait values; trucks still
+    in the queue have wait times that grow every second.
+    """
+    cutoff = sim_now - window_seconds
+    sql = f"""
+        SELECT AVG(assigned_at - arrived_at) AS avg_wait
+        FROM events
+        WHERE departed_at IS NOT NULL
+          AND departed_at >= {cutoff}
+    """
+    with engine.begin() as conn:
+        row = conn.execute(text(sql)).first()
+    return float(row.avg_wait) if row and row.avg_wait is not None else None
 
 
 # --- UI ---
@@ -134,8 +156,9 @@ try:
     waiting = fetch_waiting(engine, sim_now)
     at_gate = fetch_at_gate(engine)
     recent = fetch_recent_containers(engine)
-    tp_summary = fetch_throughput_summary(engine)
-    tp_history = fetch_throughput_history(engine)
+    tp_summary = fetch_throughput_summary(engine, sim_now)
+    tp_history = fetch_throughput_history(engine, sim_now)
+    avg_wait = fetch_avg_wait_recent(engine, sim_now)
 except Exception as e:
     st.error(
         f"Cannot read database `{DB_URL}`. Is the simulator running?\n\n"
@@ -150,8 +173,8 @@ col1, col2, col3, col4 = st.columns(4)
 col1.metric("Waiting trucks", len(waiting))
 col2.metric("At gate", len(at_gate))
 col3.metric(
-    "Avg wait",
-    f"{waiting['waited_s'].mean():.0f}s" if not waiting.empty else "—",
+    "Avg wait (10m)",
+    f"{avg_wait:.0f}s" if avg_wait is not None else "—",
 )
 col4.metric(
     "Throughput (10 min)",
@@ -253,10 +276,10 @@ else:
     # Pivot for stacked chart.
     pivot = (
         tp_history.pivot_table(
-            index="minute", columns="gate_id", values="trucks_served", aggfunc="sum"
+            index="minutes_ago", columns="gate_id", values="trucks_served", aggfunc="sum"
         )
         .fillna(0)
-        .sort_index()
+        .sort_index(ascending=False)
     )
     st.bar_chart(pivot)
 

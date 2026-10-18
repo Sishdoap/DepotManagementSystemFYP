@@ -30,6 +30,7 @@ from .db import (
     insert_container_reading,
     insert_event,
     mean_service_time,
+    recent_arrival_rate,
     record_throughput_sample,
     recent_throughput,
     update_event_assignment,
@@ -377,6 +378,11 @@ class DepotSimulation:
                         now=self.env.now,
                         window_seconds=self.config.throughput_window_seconds,
                     ),
+                    busy_seconds=(
+                        self.env.now - self._service_start[gid]
+                        if self._service_start[gid] is not None
+                        else 0.0
+                    ),
                 )
             )
 
@@ -389,6 +395,11 @@ class DepotSimulation:
             global_queue_length=len(self.waiting),
             head_truck_wait_seconds=head_wait,
             now=self.env.now,
+            arrival_rate_per_minute=recent_arrival_rate(
+                self.engine,
+                now=self.env.now,
+                window_seconds=self.config.throughput_window_seconds,
+            ),
         )
 
     def _sample_service_time(self, gate_id: str) -> float:

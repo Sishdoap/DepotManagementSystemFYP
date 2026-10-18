@@ -53,6 +53,8 @@ class EvaluationConfig:
     )
     ocr_error_rate: float = 0.05
     n_workers: int = 0     # 0 = auto (os.cpu_count())
+    seed_offset: int = 0   # seeds are seed_offset .. seed_offset + n_seeds - 1;
+                           # tune parameters on a different offset than you evaluate on
 
 
 # --- Per-run output ---
@@ -167,7 +169,8 @@ def run_evaluation(
     tasks = []
     for router_name, builder in routers.items():
         for rate in eval_config.arrival_rates:
-            for seed in range(eval_config.n_seeds):
+            for seed in range(eval_config.seed_offset,
+                              eval_config.seed_offset + eval_config.n_seeds):
                 tasks.append((router_name, builder, rate, seed, eval_config))
 
     n_workers = eval_config.n_workers or mp.cpu_count()

@@ -21,6 +21,7 @@ from src.router import (
     ShortestQueueRouter,
     StrictFIFORouter,
     UnstrictFIFORouter,
+    UnstrictFIFOv2Router,
 )
 
 
@@ -48,6 +49,7 @@ def make_state(
 # ============================================================
 
 ALL_ROUTERS: list[tuple[str, callable]] = [
+    ("unstrict_v2", lambda: UnstrictFIFOv2Router()),
     ("unstrict", lambda: UnstrictFIFORouter()),
     ("strict", lambda: StrictFIFORouter()),
     ("round_robin", lambda: RoundRobinRouter()),
@@ -207,6 +209,93 @@ class TestUnstrictFIFO:
         decision = router.choose(state)
         assert "score" in decision.reason.lower()
         assert "tpm" in decision.reason.lower()
+
+
+# ============================================================
+# Unstrict FIFO v2 — FYP2 research contribution
+# ============================================================
+
+def v2_state(*gate_specs, queue=1, head_wait=0.0, rate=0.0, now=1000.0) -> RouterState:
+    """Gate specs: (id, busy, mean_service_seconds, busy_seconds)."""
+    return RouterState(
+        gates=[
+            GateState(gid, busy, 0, 0.0, mean_service_seconds=mean, busy_seconds=busy_s)
+            for gid, busy, mean, busy_s in gate_specs
+        ],
+        global_queue_length=queue,
+        head_truck_wait_seconds=head_wait,
+        now=now,
+        arrival_rate_per_minute=rate,
+    )
+
+
+class TestUnstrictFIFOv2:
+    def test_holds_for_faster_gate_finishing_soon(self):
+        # Only slow A is free; C (30 s) finishes in ~10 s. Waiting gives
+        # ~40 s to clear vs 180 s at A, so the truck should be held.
+        router = UnstrictFIFOv2Router(lookahead_seconds=0)
+        state = v2_state(("A", False, 180.0, 0.0), ("C", True, 30.0, 20.0), queue=1)
+        assert router.choose(state) is None
+
+    def test_uses_slow_gate_when_queue_is_long(self):
+        # With 8 trucks waiting, C alone can't clear the queue before A
+        # would finish one, so the plan uses A and the head truck goes there.
+        router = UnstrictFIFOv2Router(lookahead_seconds=0)
+        state = v2_state(("A", False, 180.0, 0.0), ("C", True, 30.0, 20.0), queue=8)
+        decision = router.choose(state)
+        assert decision is not None
+        assert decision.gate_id == "A"
+
+    def test_lookahead_makes_slow_gate_usable(self):
+        # Same as the hold case, but heavy expected arrivals justify A.
+        state = v2_state(
+            ("A", False, 180.0, 0.0), ("C", True, 30.0, 20.0), queue=1, rate=3.0
+        )
+        assert UnstrictFIFOv2Router(lookahead_seconds=0).choose(state) is None
+        assert UnstrictFIFOv2Router(lookahead_seconds=180).choose(state).gate_id == "A"
+
+    def test_picks_fastest_free_gate(self):
+        router = UnstrictFIFOv2Router()
+        state = v2_state(("A", False, 180.0, 0.0), ("B", False, 90.0, 0.0), ("C", False, 30.0, 0.0))
+        assert router.choose(state).gate_id == "C"
+
+    def test_overrunning_busy_gate_still_expected_soon(self):
+        # C has been busy longer than its mean: remaining is clamped to the
+        # minimum, so waiting for C still beats 180 s at A.
+        router = UnstrictFIFOv2Router(lookahead_seconds=0)
+        state = v2_state(("A", False, 180.0, 0.0), ("C", True, 30.0, 45.0))
+        assert router.choose(state) is None
+
+    def test_busy_gate_without_estimate_is_not_waited_for(self):
+        router = UnstrictFIFOv2Router(lookahead_seconds=0)
+        state = v2_state(("A", False, 180.0, 0.0), ("C", True, None, 5.0))
+        assert router.choose(state).gate_id == "A"
+
+    def test_bootstrap_unseen_free_gate(self):
+        router = UnstrictFIFOv2Router()
+        state = v2_state(("A", False, None, 0.0), ("C", False, 30.0, 0.0))
+        decision = router.choose(state)
+        assert decision.gate_id == "A"
+        assert "bootstrap" in decision.reason.lower()
+
+    def test_starvation_guard_overrides_holding(self):
+        router = UnstrictFIFOv2Router(lookahead_seconds=0, max_wait_seconds=60)
+        state = v2_state(("A", False, 180.0, 0.0), ("C", True, 30.0, 20.0), head_wait=120.0)
+        decision = router.choose(state)
+        assert decision.gate_id == "A"
+        assert "starvation" in decision.reason.lower()
+
+    def test_reason_explains_plan_and_reserve(self):
+        router = UnstrictFIFOv2Router(lookahead_seconds=0)
+        state = v2_state(("A", False, 180.0, 0.0), ("C", False, 30.0, 0.0))
+        decision = router.choose(state)
+        assert decision.gate_id == "C"
+        assert "plan" in decision.reason
+        assert "reserve" in decision.reason and "A" in decision.reason
+
+    def test_negative_lookahead_rejected(self):
+        with pytest.raises(ValueError):
+            UnstrictFIFOv2Router(lookahead_seconds=-1)
 
 
 # ============================================================

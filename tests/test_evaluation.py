@@ -95,6 +95,22 @@ class TestEvaluationRun:
             assert a.p95_wait == b.p95_wait
 
 
+class TestSeedOffset:
+    def test_offset_shifts_seed_block(self):
+        config = EvaluationConfig(
+            arrival_rates=(2.0,),
+            n_seeds=2,
+            duration_seconds=300.0,
+            warmup_seconds=0.0,
+            n_workers=1,
+            seed_offset=1000,
+        )
+        records = run_evaluation(
+            {"StrictFIFO": lambda seed: StrictFIFORouter()}, config, progress=False
+        )
+        assert sorted(r.seed for r in records) == [1000, 1001]
+
+
 class TestSummarize:
     def test_one_cell_per_router_rate(self):
         config = EvaluationConfig(

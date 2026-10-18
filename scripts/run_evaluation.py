@@ -24,6 +24,7 @@ from src.router import (
     RoundRobinRouter,
     StrictFIFORouter,
     UnstrictFIFORouter,
+    UnstrictFIFOv2Router,
 )
 
 
@@ -34,6 +35,10 @@ def build_strict_fifo(seed: int):
 
 def build_unstrict_fifo(seed: int):
     return UnstrictFIFORouter(alpha=0.7)
+
+def build_unstrict_fifo_v2(seed: int):
+    # Default lookahead chosen by scripts/tune_unstrict_v2.py on held-out seeds.
+    return UnstrictFIFOv2Router()
 
 def build_round_robin(seed: int):
     return RoundRobinRouter()
@@ -47,6 +52,7 @@ def build_random(seed: int):
 ROUTERS = {
     "StrictFIFO":    build_strict_fifo,
     "UnstrictFIFO":  build_unstrict_fifo,
+    "UnstrictFIFOv2": build_unstrict_fifo_v2,
     "RoundRobin":    build_round_robin,
     "Random":        build_random,
 }
@@ -61,7 +67,7 @@ CONFIG = EvaluationConfig(
 
 # The router every other router is tested against, and the reference for
 # the brief's ">25% congestion reduction" target.
-CANDIDATE = "UnstrictFIFO"
+CANDIDATE = "UnstrictFIFOv2"
 REFERENCE = "StrictFIFO"
 
 

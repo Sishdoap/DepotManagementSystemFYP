@@ -355,6 +355,31 @@ def recent_throughput(
     return trucks / (window_seconds / 60.0)
 
 
+def recent_arrival_rate(
+    engine: Engine,
+    *,
+    now: float,
+    window_seconds: int = 600,
+) -> float:
+    """Trucks arriving per minute over the last `window_seconds`.
+
+    Early in a run (now < window_seconds) the rate is taken over the time
+    elapsed so far, so it isn't underestimated just because the window
+    reaches back before the start.
+    """
+    span = min(float(window_seconds), now)
+    if span <= 0:
+        return 0.0
+    with transaction(engine) as conn:
+        n = conn.execute(
+            select(func.count())
+            .select_from(events)
+            .where(events.c.arrived_at > now - span)
+            .where(events.c.arrived_at <= now)
+        ).scalar()
+    return float(n or 0) / (span / 60.0)
+
+
 def mean_service_time(
     engine: Engine,
     gate_id: str,

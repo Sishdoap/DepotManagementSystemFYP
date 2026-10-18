@@ -25,13 +25,19 @@ PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Consistent ordering and colors across all plots.
-ROUTER_ORDER = ["StrictFIFO", "Random", "UnstrictFIFO", "RoundRobin"]
+ROUTER_ORDER = ["StrictFIFO", "Random", "UnstrictFIFO", "UnstrictFIFOv2", "RoundRobin"]
 ROUTER_COLORS = {
-    "StrictFIFO":    "#1f77b4",
-    "Random":        "#9467bd",
-    "UnstrictFIFO":  "#d62728",
-    "RoundRobin":    "#7f7f7f",
+    "StrictFIFO":     "#1f77b4",
+    "Random":         "#9467bd",
+    "UnstrictFIFO":   "#ff7f0e",
+    "UnstrictFIFOv2": "#d62728",
+    "RoundRobin":     "#7f7f7f",
 }
+UTILIZATION_ROUTERS = [
+    ("StrictFIFO", "Strict FIFO"),
+    ("UnstrictFIFO", "Unstrict FIFO (FYP1)"),
+    ("UnstrictFIFOv2", "Unstrict FIFO v2"),
+]
 
 
 def load() -> pd.DataFrame:
@@ -111,52 +117,48 @@ def plot_metric(df: pd.DataFrame, metric: str, log: bool = False) -> None:
 
 
 def plot_utilization(df: pd.DataFrame) -> None:
-    """Grouped bar chart: per-gate utilization for strict vs unstrict FIFO,
-    averaged across all rates and seeds."""
-    pair = df[df["router_name"].isin(["StrictFIFO", "UnstrictFIFO"])]
-    grouped = pair.groupby("router_name")[["util_A", "util_B", "util_C"]].mean() * 100
+    """Grouped bar chart: per-gate utilization for strict FIFO and both
+    unstrict FIFO versions, averaged across all rates and seeds. The
+    annotation is v2's change versus strict FIFO."""
+    present = [(r, label) for r, label in UTILIZATION_ROUTERS if r in set(df["router_name"])]
+    sub = df[df["router_name"].isin([r for r, _ in present])]
+    grouped = sub.groupby("router_name")[["util_A", "util_B", "util_C"]].mean() * 100
+    n_seeds = df.groupby(["router_name", "arrival_rate"]).size().max()
+    rates = sorted(df["arrival_rate"].unique())
 
-    fig, ax = plt.subplots(figsize=(7, 5))
+    fig, ax = plt.subplots(figsize=(8, 5))
     x = np.arange(3)
-    width = 0.35
+    width = 0.8 / len(present)
     gates = ["Gate A (slow)", "Gate B (medium)", "Gate C (fast)"]
 
-    ax.bar(
-        x - width / 2,
-        grouped.loc["StrictFIFO"].values,
-        width,
-        label="Strict FIFO",
-        color=ROUTER_COLORS["StrictFIFO"],
-    )
-    ax.bar(
-        x + width / 2,
-        grouped.loc["UnstrictFIFO"].values,
-        width,
-        label="Unstrict FIFO",
-        color=ROUTER_COLORS["UnstrictFIFO"],
-    )
+    for i, (router, label) in enumerate(present):
+        offset = (i - (len(present) - 1) / 2) * width
+        ax.bar(x + offset, grouped.loc[router].values, width,
+               label=label, color=ROUTER_COLORS[router])
 
     ax.set_ylabel("Utilization (%)")
-    ax.set_title("Per-gate utilization redistribution\n(averaged across rates 1.5–2.4/min, 30 seeds)")
+    ax.set_title(
+        "Per-gate utilization redistribution\n"
+        f"(averaged across rates {rates[0]}–{rates[-1]}/min, {n_seeds} seeds)"
+    )
     ax.set_xticks(x)
     ax.set_xticklabels(gates)
     ax.legend()
     ax.grid(True, axis="y", alpha=0.3)
 
-    # Annotate the deltas.
-    for i, gate in enumerate(["util_A", "util_B", "util_C"]):
-        strict = grouped.loc["StrictFIFO", gate]
-        unstrict = grouped.loc["UnstrictFIFO", gate]
-        delta = unstrict - strict
-        sign = "+" if delta >= 0 else ""
-        ax.annotate(
-            f"{sign}{delta:.1f}pp",
-            xy=(i, max(strict, unstrict) + 2),
-            ha="center",
-            fontsize=10,
-            fontweight="bold",
-            color="black",
-        )
+    # Annotate v2's change versus strict FIFO.
+    if {"StrictFIFO", "UnstrictFIFOv2"} <= set(grouped.index):
+        for i, gate in enumerate(["util_A", "util_B", "util_C"]):
+            delta = grouped.loc["UnstrictFIFOv2", gate] - grouped.loc["StrictFIFO", gate]
+            sign = "+" if delta >= 0 else ""
+            ax.annotate(
+                f"v2 {sign}{delta:.1f}pp",
+                xy=(i, grouped[gate].max() + 2),
+                ha="center",
+                fontsize=10,
+                fontweight="bold",
+                color="black",
+            )
 
     fig.tight_layout()
     fig.savefig(PLOTS_DIR / "utilization_redistribution.png", dpi=150, bbox_inches="tight")

@@ -20,6 +20,7 @@ from src.router import (
     ShortestQueueRouter,
     StrictFIFORouter,
     UnstrictFIFORouter,
+    UnstrictFIFOv2Router,
 )
 from src.simulation import (
     DepotSimulation,
@@ -174,6 +175,7 @@ class TestRouterIntegration:
     @pytest.mark.parametrize("router_factory", [
         lambda: StrictFIFORouter(),
         lambda: UnstrictFIFORouter(alpha=0.7),
+        lambda: UnstrictFIFOv2Router(),
         lambda: RoundRobinRouter(),
         lambda: RandomRouter(rng=random.Random(0)),
         lambda: ShortestQueueRouter(),
@@ -224,10 +226,49 @@ class TestUnstrictFIFOBehavior:
         )
 
 
+class TestUnstrictFIFOv2Behavior:
+    """With strongly heterogeneous gates, v2 should keep slow Gate A in
+    reserve and cut time in system compared with strict FIFO."""
+
+    EVAL_GATES = (
+        GateConfig("A", mean_service_seconds=180.0, std_service_seconds=30.0),
+        GateConfig("B", mean_service_seconds=90.0, std_service_seconds=15.0),
+        GateConfig("C", mean_service_seconds=30.0, std_service_seconds=5.0),
+    )
+
+    def _run(self, router, seed=0):
+        engine = make_engine("sqlite:///:memory:")
+        init_schema(engine)
+        config = SimulationConfig(
+            duration_seconds=7200, arrival_rate_per_minute=1.5, seed=seed,
+            image_config=CLEAN, gates=self.EVAL_GATES, warmup_seconds=600,
+        )
+        return DepotSimulation(
+            config=config,
+            router=router,
+            ocr=MockOCRAdapter(error_rate=0.0, rng=random.Random(seed)),
+            engine=engine,
+            image_source=SyntheticImageSource(ContainerImageGenerator(rng=random.Random(seed))),
+            fast_mode=True,
+        ).run()
+
+    def test_v2_uses_slow_gate_less_than_strict(self):
+        strict = self._run(StrictFIFORouter(rng=random.Random(0)))
+        v2 = self._run(UnstrictFIFOv2Router(lookahead_seconds=0))
+        assert v2.per_gate_throughput["A"] < strict.per_gate_throughput["A"]
+
+    def test_v2_reduces_time_in_system(self):
+        import statistics
+        strict = self._run(StrictFIFORouter(rng=random.Random(0)))
+        v2 = self._run(UnstrictFIFOv2Router(lookahead_seconds=0))
+        assert statistics.mean(v2.sojourn_times) < statistics.mean(strict.sojourn_times)
+
+
 class TestDispatch:
     @pytest.mark.parametrize("router_factory", [
         lambda: StrictFIFORouter(),
         lambda: UnstrictFIFORouter(alpha=0.7),
+        lambda: UnstrictFIFOv2Router(),
     ])
     def test_dispatched_trucks_start_service_immediately(self, router_factory):
         """A truck dispatched to a gate must start service at that instant.

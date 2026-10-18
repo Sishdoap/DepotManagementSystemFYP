@@ -28,6 +28,7 @@ from src.db import (
     list_waiting,
     make_engine,
     mean_service_time,
+    recent_arrival_rate,
     recent_throughput,
     record_throughput_sample,
     update_event_assignment,
@@ -212,6 +213,26 @@ class TestMeanServiceTime:
     def test_per_gate_isolation(self, engine):
         record_throughput_sample(engine, gate_id="B", completed_at=1400.0, service_time=30.0)
         assert mean_service_time(engine, "A", now=1500.0, window_seconds=600) is None
+
+
+class TestArrivalRate:
+    def test_no_arrivals_is_zero(self, engine):
+        assert recent_arrival_rate(engine, now=1500.0, window_seconds=600) == 0.0
+
+    def test_counts_only_window(self, engine):
+        for t in (100.0, 1000.0, 1200.0, 1400.0):
+            insert_event(engine, plate="W1", arrived_at=t)
+        # 3 arrivals in the last 10 minutes = 0.3 per minute.
+        assert recent_arrival_rate(engine, now=1500.0, window_seconds=600) == pytest.approx(0.3)
+
+    def test_early_in_run_uses_elapsed_time(self, engine):
+        insert_event(engine, plate="W1", arrived_at=30.0)
+        insert_event(engine, plate="W2", arrived_at=90.0)
+        # 2 arrivals in the first 2 minutes = 1 per minute, not 2/10.
+        assert recent_arrival_rate(engine, now=120.0, window_seconds=600) == pytest.approx(1.0)
+
+    def test_at_time_zero(self, engine):
+        assert recent_arrival_rate(engine, now=0.0, window_seconds=600) == 0.0
 
 
 class TestSchemaPortability:

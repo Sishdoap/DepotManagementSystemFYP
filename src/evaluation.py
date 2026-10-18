@@ -3,7 +3,9 @@
 Runs many simulations across a grid of (router, arrival_rate, seed) and
 produces statistically defensible comparisons:
 
-  - bootstrap 95% confidence intervals on mean and p95 wait times
+  - bootstrap 95% confidence intervals on mean and p95 time in system
+    (arrival to departure — the congestion delay a truck actually
+    experiences) and on queue wait (arrival to gate assignment)
   - Mann-Whitney U tests pairwise vs unstrict FIFO (Bonferroni-corrected)
   - per-run raw data persisted to CSV for downstream plotting
 
@@ -43,6 +45,7 @@ class EvaluationConfig:
     arrival_rates: tuple[float, ...]
     n_seeds: int
     duration_seconds: float = 7200.0
+    warmup_seconds: float = 600.0     # discard the empty-depot start-up transient
     gates: tuple[GateConfig, ...] = (
         GateConfig("A", mean_service_seconds=180.0, std_service_seconds=30.0),
         GateConfig("B", mean_service_seconds=90.0, std_service_seconds=15.0),
@@ -62,7 +65,10 @@ class RunRecord:
     seed: int
     n_arrivals: int
     n_completed: int
-    mean_wait: float
+    n_unfinished: int
+    mean_sojourn: float      # time in system: primary congestion metric
+    p95_sojourn: float
+    mean_wait: float         # queue wait only (excludes time spent at the gate)
     p95_wait: float
     p99_wait: float
     max_wait: float
@@ -95,6 +101,7 @@ def _run_one(args) -> RunRecord:
             seed=seed,
             image_config=CLEAN,
             gates=eval_config.gates,
+            warmup_seconds=eval_config.warmup_seconds,
         ),
         router=router_builder(seed),
         ocr=MockOCRAdapter(error_rate=eval_config.ocr_error_rate, rng=random.Random(seed)),
@@ -105,13 +112,11 @@ def _run_one(args) -> RunRecord:
     r = sim.run()
 
     waits = sorted(r.wait_times) if r.wait_times else [0.0]
-    n = len(waits)
+    sojourns = sorted(r.sojourn_times) if r.sojourn_times else [0.0]
 
-    def pct(p):
-        if n == 0:
-            return 0.0
-        idx = min(int(p * (n - 1)), n - 1)
-        return waits[idx]
+    def pct(values, p):
+        idx = min(int(p * (len(values) - 1)), len(values) - 1)
+        return values[idx]
 
     return RunRecord(
         router_name=router_name,
@@ -119,9 +124,12 @@ def _run_one(args) -> RunRecord:
         seed=seed,
         n_arrivals=r.n_arrivals,
         n_completed=r.n_completed,
+        n_unfinished=r.n_unfinished,
+        mean_sojourn=statistics.mean(sojourns),
+        p95_sojourn=pct(sojourns, 0.95),
         mean_wait=statistics.mean(waits),
-        p95_wait=pct(0.95),
-        p99_wait=pct(0.99),
+        p95_wait=pct(waits, 0.95),
+        p99_wait=pct(waits, 0.99),
         max_wait=max(waits),
         util_A=r.per_gate_utilization.get("A", 0.0),
         util_B=r.per_gate_utilization.get("B", 0.0),
@@ -194,6 +202,12 @@ class CellSummary:
     router_name: str
     arrival_rate: float
     n_seeds: int
+    mean_sojourn: float
+    mean_sojourn_ci_lo: float
+    mean_sojourn_ci_hi: float
+    p95_sojourn: float
+    p95_sojourn_ci_lo: float
+    p95_sojourn_ci_hi: float
     mean_wait: float
     mean_wait_ci_lo: float
     mean_wait_ci_hi: float
@@ -230,14 +244,20 @@ def summarize_cells(records: list[RunRecord]) -> list[CellSummary]:
 
     out = []
     for (name, rate), recs in sorted(grouped.items()):
-        means = [r.mean_wait for r in recs]
-        p95s = [r.p95_wait for r in recs]
-        mean_m, mean_lo, mean_hi = bootstrap_ci(means)
-        p95_m, p95_lo, p95_hi = bootstrap_ci(p95s)
+        soj_m, soj_lo, soj_hi = bootstrap_ci([r.mean_sojourn for r in recs])
+        soj95_m, soj95_lo, soj95_hi = bootstrap_ci([r.p95_sojourn for r in recs])
+        mean_m, mean_lo, mean_hi = bootstrap_ci([r.mean_wait for r in recs])
+        p95_m, p95_lo, p95_hi = bootstrap_ci([r.p95_wait for r in recs])
         out.append(CellSummary(
             router_name=name,
             arrival_rate=rate,
             n_seeds=len(recs),
+            mean_sojourn=soj_m,
+            mean_sojourn_ci_lo=soj_lo,
+            mean_sojourn_ci_hi=soj_hi,
+            p95_sojourn=soj95_m,
+            p95_sojourn_ci_lo=soj95_lo,
+            p95_sojourn_ci_hi=soj95_hi,
             mean_wait=mean_m,
             mean_wait_ci_lo=mean_lo,
             mean_wait_ci_hi=mean_hi,
@@ -263,7 +283,7 @@ class PairwiseTest:
     router_a: str
     router_b: str
     arrival_rate: float
-    metric: str             # "mean_wait" or "p95_wait"
+    metric: str             # any RunRecord field, e.g. "mean_sojourn" or "mean_wait"
     n_seeds: int
     u_statistic: float
     p_value_raw: float
@@ -275,7 +295,7 @@ def pairwise_tests(
     records: list[RunRecord],
     *,
     baseline_router: str,
-    metric: str = "mean_wait",
+    metric: str = "mean_sojourn",
     alpha: float = 0.05,
 ) -> list[PairwiseTest]:
     """Compare every non-baseline router against the baseline at each rate.

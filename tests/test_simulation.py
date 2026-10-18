@@ -81,6 +81,72 @@ class TestBasicRun:
         assert all(s > 0 for s in result.service_times)
 
 
+class TestMetrics:
+    def test_sojourn_recorded_per_completed_truck(self):
+        result = make_sim(router=StrictFIFORouter(), duration=1800).run()
+        assert len(result.sojourn_times) == result.n_completed
+        assert len(result.service_times) == result.n_completed
+        # Time in system = queue wait + service, so it can't be shorter.
+        assert sum(result.sojourn_times) >= sum(result.service_times)
+
+    def test_unfinished_accounts_for_every_arrival(self):
+        result = make_sim(router=StrictFIFORouter(), arrival_rate=4.0).run()
+        assert result.n_completed + result.n_unfinished == result.n_arrivals
+
+    def test_warmup_excludes_early_arrivals(self):
+        full = make_sim(router=StrictFIFORouter(), duration=1800, seed=3).run()
+        engine = make_engine("sqlite:///:memory:")
+        init_schema(engine)
+        config = SimulationConfig(
+            duration_seconds=1800, arrival_rate_per_minute=2.0, seed=3,
+            image_config=CLEAN, warmup_seconds=600,
+        )
+        warm = DepotSimulation(
+            config=config,
+            router=StrictFIFORouter(),
+            ocr=MockOCRAdapter(error_rate=0.0, rng=random.Random(3)),
+            engine=engine,
+            image_source=SyntheticImageSource(ContainerImageGenerator(rng=random.Random(3))),
+            fast_mode=True,
+        ).run()
+        # Same seed, same arrivals: warm-up only drops the first 10 minutes.
+        assert 0 < warm.n_arrivals < full.n_arrivals
+
+    def test_warmup_must_be_shorter_than_run(self):
+        engine = make_engine("sqlite:///:memory:")
+        init_schema(engine)
+        config = SimulationConfig(duration_seconds=600, warmup_seconds=600, image_config=CLEAN)
+        with pytest.raises(ValueError):
+            DepotSimulation(
+                config=config,
+                router=StrictFIFORouter(),
+                ocr=MockOCRAdapter(error_rate=0.0, rng=random.Random(0)),
+                engine=engine,
+                image_source=SyntheticImageSource(ContainerImageGenerator(rng=random.Random(0))),
+            )
+
+    def test_utilization_counts_service_in_progress(self):
+        # One very slow gate: the first truck is still being served when the
+        # run ends, so completed-only accounting would report zero utilization.
+        engine = make_engine("sqlite:///:memory:")
+        init_schema(engine)
+        config = SimulationConfig(
+            duration_seconds=600, arrival_rate_per_minute=2.0, seed=0,
+            image_config=CLEAN,
+            gates=(GateConfig("A", mean_service_seconds=5000.0, std_service_seconds=1.0),),
+        )
+        result = DepotSimulation(
+            config=config,
+            router=StrictFIFORouter(),
+            ocr=MockOCRAdapter(error_rate=0.0, rng=random.Random(0)),
+            engine=engine,
+            image_source=SyntheticImageSource(ContainerImageGenerator(rng=random.Random(0))),
+            fast_mode=True,
+        ).run()
+        assert result.n_completed == 0
+        assert result.per_gate_utilization["A"] > 0.5
+
+
 class TestReproducibility:
     """Same seed -> identical results (NFR: reproducibility)."""
 

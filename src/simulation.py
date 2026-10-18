@@ -70,6 +70,7 @@ class SimulationConfig:
     )
     image_config: GenerationConfig = field(default_factory=GenerationConfig)
     throughput_window_seconds: int = 600        # rolling window for router
+    warmup_seconds: float = 0.0                 # trucks arriving earlier are excluded from stats
     seed: int = 0                                # for reproducibility
 
 
@@ -92,15 +93,23 @@ class Truck:
 @dataclass
 class SimulationResult:
     """What one simulation run produces. The DB has the full record;
-    this is a lightweight summary for the evaluation harness."""
+    this is a lightweight summary for the evaluation harness.
+
+    Truck-level statistics cover only trucks that arrived after the warm-up
+    period (`SimulationConfig.warmup_seconds`), so the empty-depot start-up
+    transient doesn't flatter any router. Gate statistics cover the
+    measurement window [warmup, duration].
+    """
     router_name: str
     seed: int
     n_arrivals: int
     n_completed: int
+    n_unfinished: int            # arrived but still queued or in service at the end
     n_recoveries: int            # trucks whose OCR was recovered (raw != recovered)
     n_ocr_valid: int             # trucks whose container code came out valid
-    wait_times: list[float]      # per-truck wait time (assigned_at - arrived_at)
-    service_times: list[float]   # per-truck service time (departed_at - assigned_at)
+    wait_times: list[float]      # per-truck queue wait (assigned_at - arrived_at), trucks that reached a gate
+    service_times: list[float]   # per-truck service time (departed_at - assigned_at), completed trucks
+    sojourn_times: list[float]   # per-truck time in system (departed_at - arrived_at), completed trucks
     per_gate_utilization: dict[str, float]
     per_gate_throughput: dict[str, int]
 
@@ -122,6 +131,11 @@ class DepotSimulation:
         realtime_factor: float = 1.0,  # only used in real-time mode
         share_frames: bool = False,
     ):
+        if not 0.0 <= config.warmup_seconds < config.duration_seconds:
+            raise ValueError(
+                f"warmup_seconds ({config.warmup_seconds}) must be in "
+                f"[0, duration_seconds={config.duration_seconds})"
+            )
         self.config = config
         self.router = router
         self.ocr = ocr
@@ -159,10 +173,14 @@ class DepotSimulation:
         # Triggered when a truck arrives or a gate frees.
         self.dispatch_event: simpy.Event = self.env.event()
 
-        # Stats accumulators.
+        # When the current truck at each gate started service (None if idle).
+        self._service_start: dict[str, Optional[float]] = {g: None for g in self.gates}
+
+        # Stats accumulators. Truck stats only count post-warm-up arrivals.
         self._truck_id_counter = 0
         self._wait_times: list[float] = []
         self._service_times: list[float] = []
+        self._sojourn_times: list[float] = []
         self._gate_busy_time: dict[str, float] = {g: 0.0 for g in self.gates}
         self._gate_completion_count: dict[str, int] = {g: 0 for g in self.gates}
         self._n_arrivals = 0
@@ -204,7 +222,8 @@ class DepotSimulation:
                 status="waiting",
             )
             self.waiting.append(truck)
-            self._n_arrivals += 1
+            if self._measured(truck):
+                self._n_arrivals += 1
 
             # Wake the dispatcher.
             self._signal_dispatcher()
@@ -229,6 +248,7 @@ class DepotSimulation:
                 # piling trucks onto it (they'd silently queue on the gate's
                 # SimPy resource while other gates sat idle).
                 self.gate_busy[decision.gate_id] = True
+                self._service_start[decision.gate_id] = self.env.now
                 truck = self.waiting.pop(0)
                 self.env.process(self._gate_service_process(truck, decision))
 
@@ -245,7 +265,8 @@ class DepotSimulation:
             truck.assigned_gate = gate_id
             truck.assigned_at = self.env.now
             self.gate_busy[gate_id] = True
-            self._wait_times.append(truck.assigned_at - truck.arrived_at)
+            if self._measured(truck):
+                self._wait_times.append(truck.assigned_at - truck.arrived_at)
 
             update_event_assignment(
                 self.engine,
@@ -303,10 +324,15 @@ class DepotSimulation:
             # Departure.
             truck.departed_at = self.env.now
             actual_service = truck.departed_at - truck.assigned_at
-            self._service_times.append(actual_service)
-            self._gate_busy_time[gate_id] += actual_service
-            self._gate_completion_count[gate_id] += 1
-            self._n_completed += 1
+            self._gate_busy_time[gate_id] += self._overlap_with_measurement(
+                truck.assigned_at, truck.departed_at
+            )
+            if truck.departed_at >= self.config.warmup_seconds:
+                self._gate_completion_count[gate_id] += 1
+            if self._measured(truck):
+                self._service_times.append(actual_service)
+                self._sojourn_times.append(truck.departed_at - truck.arrived_at)
+                self._n_completed += 1
 
             complete_event(self.engine, truck.event_id, truck.departed_at)
             record_throughput_sample(
@@ -317,6 +343,7 @@ class DepotSimulation:
             )
 
             self.gate_busy[gate_id] = False
+            self._service_start[gate_id] = None
             self._signal_dispatcher()
 
     # --- Helpers ---
@@ -362,20 +389,37 @@ class DepotSimulation:
         sample = self._rng_service.gauss(gc.mean_service_seconds, gc.std_service_seconds)
         return max(0.1, sample)
 
+    def _measured(self, truck: Truck) -> bool:
+        """Whether a truck counts towards statistics (arrived after warm-up)."""
+        return truck.arrived_at >= self.config.warmup_seconds
+
+    def _overlap_with_measurement(self, start: float, end: float) -> float:
+        """Length of [start, end] that falls inside [warmup, duration]."""
+        lo = max(start, self.config.warmup_seconds)
+        hi = min(end, self.config.duration_seconds)
+        return max(0.0, hi - lo)
+
     def _build_result(self) -> SimulationResult:
-        utilization = {
-            gid: (busy / self.config.duration_seconds)
-            for gid, busy in self._gate_busy_time.items()
-        }
+        # Count service still in progress at the end, otherwise a gate that
+        # is mid-service when the clock stops looks less utilised than it was.
+        busy_time = dict(self._gate_busy_time)
+        for gid, start in self._service_start.items():
+            if start is not None:
+                busy_time[gid] += self._overlap_with_measurement(start, self.env.now)
+
+        window = self.config.duration_seconds - self.config.warmup_seconds
+        utilization = {gid: (busy / window) for gid, busy in busy_time.items()}
         return SimulationResult(
             router_name=self.router.name,
             seed=self.config.seed,
             n_arrivals=self._n_arrivals,
             n_completed=self._n_completed,
+            n_unfinished=self._n_arrivals - self._n_completed,
             n_recoveries=self._n_recoveries,
             n_ocr_valid=self._n_ocr_valid,
             wait_times=list(self._wait_times),
             service_times=list(self._service_times),
+            sojourn_times=list(self._sojourn_times),
             per_gate_utilization=utilization,
             per_gate_throughput=dict(self._gate_completion_count),
         )

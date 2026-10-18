@@ -53,6 +53,7 @@ DepotManagementSystemFYP/
 ├── scripts/
 │   ├── run_evaluation.py     # Multi-seed router comparison (5 routers × 5 rates × 30 seeds)
 │   ├── tune_unstrict_v2.py   # Lookahead sensitivity sweep for Unstrict FIFO v2 (held-out seeds)
+│   ├── robustness_checks.py  # v2 under milder gate speeds and high service-time variance
 │   ├── run_realtime_sim.py   # Real-time simulator for the dashboard demo
 │   ├── dashboard.py          # Streamlit operator dashboard
 │   └── plot_evaluation.py    # Generate report-ready plots and tables from results.csv
@@ -109,6 +110,15 @@ lookahead (uses seeds 1000–1029, separate from the evaluation's 0–29):
 
 ```bash
 python scripts/tune_unstrict_v2.py
+```
+
+To check how the result depends on the gate assumptions — milder gate speed
+differences (the live-demo config) and high service-time variance — run the
+robustness checks (~5 minutes; writes `results/robustness.csv` and
+`results/robustness.md`):
+
+```bash
+python scripts/robustness_checks.py
 ```
 
 To regenerate the plots and report-ready tables from the CSV:
@@ -187,7 +197,11 @@ router's knob is `alpha` (default 0.7). See the `src/router.py` docstrings.
    fast-gate capacity, and as load approaches the depot's total capacity
    (3 trucks/min in the evaluation config) every policy must use every
    gate. v2 beats the FYP1 router significantly up to 2.0/min; above that
-   the two are indistinguishable.
+   the two are indistinguishable. **The gain also depends on how different
+   the gates are:** with milder speed differences (90/60/45 s) it falls to
+   2–7%, and with highly variable service times the high-load advantage
+   disappears. v2 is never significantly worse on time in system in any
+   tested scenario (`scripts/robustness_checks.py`).
 2. **v2 trades queue wait for time in system.** Because it may hold a
    truck for a faster gate, its mean queue wait is slightly *higher* than
    strict FIFO's (e.g. 10.1 s vs 7.8 s at 1.5/min) while total time in

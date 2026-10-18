@@ -38,6 +38,7 @@ class GateState:
     recent_throughput: float   # trucks per minute over the configured window
     mean_service_seconds: Optional[float] = None  # observed mean; None if never served
     busy_seconds: float = 0.0  # how long the current truck has been in service (0 if free)
+    idle_seconds: float = 0.0  # how long the gate has been free (0 if busy)
 
 
 @dataclass(frozen=True)
@@ -327,18 +328,16 @@ class UnstrictFIFOv2Router(Router):
 # --- Baselines ---
 
 class StrictFIFORouter(Router):
-    """Head-of-queue assigned to whichever gate is free.
+    """Head-of-queue assigned to the gate that has been free the longest.
 
-    When several gates are free, the tie-break must not depend on gate
-    names: breaking ties alphabetically happens to favour slow Gate A in
-    the evaluation config, which would make this baseline look worse than
-    a real strict-FIFO depot. Pass an `rng` to break ties uniformly at
-    random (what the evaluation does). Without one, ties fall back to
-    gate_id order, which keeps unit tests deterministic.
+    This is how a strict-FIFO depot works in practice: the next truck goes
+    to whichever gate opened up first. The tie-break deliberately does not
+    depend on gate names — breaking ties alphabetically happens to favour
+    slow Gate A in the evaluation config, which made this baseline look
+    worse than a real depot — and is not random either, which would make
+    it identical to RandomRouter. Exact ties (e.g. at start-up, when every
+    gate has been idle since t=0) fall back to gate_id order.
     """
-
-    def __init__(self, rng: Optional[random.Random] = None):
-        self._rng = rng
 
     @property
     def name(self) -> str:
@@ -350,11 +349,8 @@ class StrictFIFORouter(Router):
         free = _free_gates(state)
         if not free:
             return None
-        if self._rng is None:
-            chosen = min(free, key=lambda g: g.gate_id)
-        else:
-            chosen = self._rng.choice(sorted(free, key=lambda g: g.gate_id))
-        return Decision(gate_id=chosen.gate_id, reason="strict FIFO: next free gate")
+        chosen = min(free, key=lambda g: (-g.idle_seconds, g.gate_id))
+        return Decision(gate_id=chosen.gate_id, reason="strict FIFO: longest-idle free gate")
 
 
 class RoundRobinRouter(Router):

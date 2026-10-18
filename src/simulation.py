@@ -175,8 +175,10 @@ class DepotSimulation:
         # Triggered when a truck arrives or a gate frees.
         self.dispatch_event: simpy.Event = self.env.event()
 
-        # When the current truck at each gate started service (None if idle).
+        # When the current truck at each gate started service (None if idle),
+        # and when each gate last became free.
         self._service_start: dict[str, Optional[float]] = {g: None for g in self.gates}
+        self._idle_since: dict[str, float] = {g: 0.0 for g in self.gates}
 
         # Stats accumulators. Truck stats only count post-warm-up arrivals.
         self._truck_id_counter = 0
@@ -346,6 +348,7 @@ class DepotSimulation:
 
             self.gate_busy[gate_id] = False
             self._service_start[gate_id] = None
+            self._idle_since[gate_id] = self.env.now
             self._signal_dispatcher()
 
     # --- Helpers ---
@@ -382,6 +385,10 @@ class DepotSimulation:
                         self.env.now - self._service_start[gid]
                         if self._service_start[gid] is not None
                         else 0.0
+                    ),
+                    idle_seconds=(
+                        0.0 if self.gate_busy[gid]
+                        else self.env.now - self._idle_since[gid]
                     ),
                 )
             )

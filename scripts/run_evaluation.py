@@ -30,8 +30,7 @@ from src.router import (
 
 # Module-level builder functions — picklable, unlike lambdas.
 def build_strict_fifo(seed: int):
-    # Random tie-break so the baseline doesn't depend on gate names.
-    return StrictFIFORouter(rng=random.Random(seed))
+    return StrictFIFORouter()
 
 def build_unstrict_fifo(seed: int):
     return UnstrictFIFORouter(alpha=0.7)

@@ -321,19 +321,19 @@ class TestStrictFIFO:
         )
         assert router.choose(state).gate_id == "B"
 
-    def test_rng_tie_break_uses_every_free_gate(self):
-        router = StrictFIFORouter(rng=random.Random(0))
-        gates = [("A", False, 0, 5.0), ("B", True, 0, 5.0), ("C", False, 0, 5.0)]
-        picks = {router.choose(make_state(*gates)).gate_id for _ in range(200)}
-        assert picks == {"A", "C"}
-
-    def test_rng_tie_break_reproducible(self):
-        gates = [("A", False, 0, 5.0), ("B", False, 0, 5.0), ("C", False, 0, 5.0)]
-        r1 = StrictFIFORouter(rng=random.Random(7))
-        r2 = StrictFIFORouter(rng=random.Random(7))
-        seq1 = [r1.choose(make_state(*gates)).gate_id for _ in range(20)]
-        seq2 = [r2.choose(make_state(*gates)).gate_id for _ in range(20)]
-        assert seq1 == seq2
+    def test_picks_longest_idle_gate_regardless_of_name(self):
+        router = StrictFIFORouter()
+        state = RouterState(
+            gates=[
+                GateState("A", False, 0, 5.0, idle_seconds=10.0),
+                GateState("B", True, 0, 5.0),
+                GateState("C", False, 0, 5.0, idle_seconds=40.0),
+            ],
+            global_queue_length=1,
+            head_truck_wait_seconds=0.0,
+            now=1000.0,
+        )
+        assert router.choose(state).gate_id == "C"
 
 
 class TestRoundRobin:

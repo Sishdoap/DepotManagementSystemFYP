@@ -253,13 +253,13 @@ class TestUnstrictFIFOv2Behavior:
         ).run()
 
     def test_v2_uses_slow_gate_less_than_strict(self):
-        strict = self._run(StrictFIFORouter(rng=random.Random(0)))
+        strict = self._run(StrictFIFORouter())
         v2 = self._run(UnstrictFIFOv2Router(lookahead_seconds=0))
         assert v2.per_gate_throughput["A"] < strict.per_gate_throughput["A"]
 
     def test_v2_reduces_time_in_system(self):
         import statistics
-        strict = self._run(StrictFIFORouter(rng=random.Random(0)))
+        strict = self._run(StrictFIFORouter())
         v2 = self._run(UnstrictFIFOv2Router(lookahead_seconds=0))
         assert statistics.mean(v2.sojourn_times) < statistics.mean(strict.sojourn_times)
 

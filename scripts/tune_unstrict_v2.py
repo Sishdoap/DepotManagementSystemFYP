@@ -15,7 +15,6 @@ Outputs:
 """
 
 import dataclasses
-import random
 import sys
 import time
 from functools import partial
@@ -40,7 +39,7 @@ TUNING_CONFIG = dataclasses.replace(CONFIG, seed_offset=TUNING_SEED_OFFSET)
 
 # Module-level builders (picklable for multiprocessing).
 def build_strict_fifo(seed: int):
-    return StrictFIFORouter(rng=random.Random(seed))
+    return StrictFIFORouter()
 
 def build_unstrict_fifo(seed: int):
     return UnstrictFIFORouter(alpha=0.7)

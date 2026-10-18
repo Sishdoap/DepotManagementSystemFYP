@@ -53,6 +53,17 @@ def main():
         help="Path to CCLN model weights.",
     )
     parser.add_argument(
+    "--no-validation",
+    action="store_true",
+    help="Disable ISO 6346 validation. Reports raw OCR accuracy (raw_string == truth).",
+    )
+    parser.add_argument(
+        "--no-recovery",
+        action="store_true",
+        help="Enable validation but skip substitution recovery. "
+            "Invalid raw reads are rejected; recovery layer is bypassed.",
+    )
+    parser.add_argument(
         "--max-images",
         type=int,
         default=None,
@@ -141,9 +152,34 @@ def main():
 
         total_latency += result.latency_ms
 
-        recovered = result.recovered_code or ""
-        is_valid = result.is_valid
-        correct = is_valid and recovered == truth
+        # Three evaluation modes:
+        #   --no-validation: accept raw OCR output, no ISO 6346 check.
+        #                    "correct" iff raw output equals ground truth.
+        #   --no-recovery:   apply ISO 6346 validation, but skip substitution recovery.
+        #                    Invalid raw reads count as failures.
+        #   default:         full pipeline — validation + recovery enabled.
+        if args.no_validation:
+            final = result.raw_string or ""
+            is_valid = (final == truth and len(truth) == 11)
+            correct = is_valid
+        elif args.no_recovery:
+            # Validation only: did the raw OCR output already pass ISO 6346?
+            # If yes, accept it; otherwise, reject (no recovery attempt).
+            raw = result.raw_string or ""
+            # Strip whitespace and uppercase before validating
+            raw_clean = re.sub(r"[^A-Z0-9]", "", raw.upper())
+            from src.iso6346_recovery import is_valid_container_code
+            if is_valid_container_code(raw_clean):
+                final = raw_clean
+                is_valid = True
+            else:
+                final = ""
+                is_valid = False
+            correct = is_valid and final == truth
+        else:
+            final = result.recovered_code or ""
+            is_valid = result.is_valid
+            correct = is_valid and final == truth
 
         if correct:
             n_correct += 1
@@ -161,14 +197,14 @@ def main():
 
         print(
             f"{i:>4} {path.name[:30]:<32} {truth:<12} "
-            f"{(recovered or '—'):<12} {verdict:<14}  {result.latency_ms:>6.0f}ms"
+            f"{(final or '—'):<12} {verdict:<14}  {result.latency_ms:>6.0f}ms"
         )
 
         results.append({
             "image": path.name,
             "ground_truth": truth,
             "raw_string": result.raw_string,
-            "recovered_code": recovered,
+            "recovered_code": final,
             "is_valid": is_valid,
             "correct": correct,
             "latency_ms": result.latency_ms,
@@ -177,6 +213,11 @@ def main():
 
     # Summary.
     print("\n" + "=" * 70)
+    mode = (
+    "FULL PIPELINE (validation + recovery)" if not (args.no_validation or args.no_recovery)
+    else "VALIDATION ONLY (no recovery)" if args.no_recovery
+    else "RAW OCR (no validation, no recovery)"
+    )
     print("BENCHMARK SUMMARY")
     print("=" * 70)
     print(f"Total images discovered:    {len(image_paths)}")

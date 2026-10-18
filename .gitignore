@@ -9,3 +9,6 @@ depot_live.db-shm
 depot_live.db-wal
 .claude
 READ_ORDER.md
+CLAUDE.md
+/docs
+/results

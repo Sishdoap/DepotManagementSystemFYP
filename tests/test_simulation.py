@@ -158,6 +158,48 @@ class TestUnstrictFIFOBehavior:
         )
 
 
+class TestDispatch:
+    @pytest.mark.parametrize("router_factory", [
+        lambda: StrictFIFORouter(),
+        lambda: UnstrictFIFORouter(alpha=0.7),
+    ])
+    def test_dispatched_trucks_start_service_immediately(self, router_factory):
+        """A truck dispatched to a gate must start service at that instant.
+
+        Regression test: the dispatcher used to leave the gate marked free
+        until the gate process ran, so one wake-up could assign several
+        trucks to the same gate and they queued on its resource.
+        """
+        engine = make_engine("sqlite:///:memory:")
+        init_schema(engine)
+        router = router_factory()
+        decisions: dict[str, list[float]] = {}
+        original_choose = router.choose
+
+        def recording_choose(state):
+            d = original_choose(state)
+            if d is not None:
+                decisions.setdefault(d.gate_id, []).append(state.now)
+            return d
+
+        router.choose = recording_choose
+        make_sim(router=router, engine=engine, duration=3600, arrival_rate=2.5).run()
+
+        from src.db import events
+        from sqlalchemy import select
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(events.c.assigned_gate, events.c.assigned_at)
+                .where(events.c.assigned_at.is_not(None))
+            ).all()
+        started: dict[str, list[float]] = {}
+        for gate, assigned_at in rows:
+            started.setdefault(gate, []).append(assigned_at)
+
+        for gate, times in started.items():
+            assert sorted(times) == decisions[gate][: len(times)]
+
+
 class TestDatabaseIntegration:
     def test_events_written(self):
         engine = make_engine("sqlite:///:memory:")

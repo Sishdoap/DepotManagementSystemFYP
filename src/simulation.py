@@ -223,6 +223,12 @@ class DepotSimulation:
                 decision = self.router.choose(state)
                 if decision is None:
                     break
+                # Mark the gate busy *now*. The gate's own process doesn't run
+                # until this loop yields, so without this the next snapshot
+                # would still show the gate free and the router would keep
+                # piling trucks onto it (they'd silently queue on the gate's
+                # SimPy resource while other gates sat idle).
+                self.gate_busy[decision.gate_id] = True
                 truck = self.waiting.pop(0)
                 self.env.process(self._gate_service_process(truck, decision))
 

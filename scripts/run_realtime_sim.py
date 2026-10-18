@@ -21,7 +21,7 @@ from src.dashboard_io import clear_frames
 from src.db import drop_schema, init_schema, make_engine
 from src.image_source import RealImageSource
 from src.ocr import RealOCRAdapter
-from src.router import UnstrictFIFORouter
+from src.router import UnstrictFIFOv2Router
 from src.simulation import DepotSimulation, SimulationConfig
 
 
@@ -63,7 +63,7 @@ def main():
 
     sim = DepotSimulation(
         config=config,
-        router=UnstrictFIFORouter(alpha=0.7),
+        router=UnstrictFIFOv2Router(),
         ocr=ocr,
         engine=engine,
         image_source=image_source,

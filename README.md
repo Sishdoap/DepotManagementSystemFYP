@@ -24,10 +24,12 @@ Three research objectives addressed:
    transcription) integrated with ISO 6346 check-digit verification.
    Recovery uses OCR-confusion-aware character substitution for invalid
    reads (e.g. O↔0, S↔5).
-2. **Unstrict FIFO routing.** A gate-allocation algorithm that scores
-   gates by a weighted combination of recent throughput and queue length,
-   evaluated against four baselines (strict FIFO, round-robin, random,
-   shortest-queue) across 30 random seeds and five arrival rates.
+2. **Unstrict FIFO routing.** A gate-allocation algorithm that keeps trucks
+   in arrival order but lets the head truck skip a free slow gate when a
+   busy fast gate is expected to clear it sooner (v2, FYP2). It plans the
+   queue against each gate's observed service time and the recent arrival
+   rate. Evaluated against the FYP1 version and three baselines (strict
+   FIFO, round-robin, random) across 30 random seeds and five arrival rates.
 3. **Unified identification architecture.** Modular pipeline with
    placeholders for vehicle make/model recognition and license plate
    recognition (FYP2 work), connected through a profile fusion layer.
@@ -43,13 +45,14 @@ DepotManagementSystemFYP/
 │   ├── ocr.py                # OCRAdapter ABC, MockOCRAdapter, RealOCRAdapter
 │   ├── image_source.py       # ImageSource ABC, SyntheticImageSource, RealImageSource
 │   ├── synthetic_images.py   # Procedural container code image generator
-│   ├── router.py             # Router ABC, UnstrictFIFORouter + 4 baselines
+│   ├── router.py             # Router ABC, UnstrictFIFOv2Router, UnstrictFIFORouter + baselines
 │   ├── simulation.py         # SimPy discrete-event simulation harness
 │   ├── evaluation.py         # Multi-seed evaluation with bootstrap CIs
 │   ├── dashboard_io.py       # Atomic frame writes for the live dashboard
 │   └── CCLN.py               # Container code localization network (model definition)
 ├── scripts/
 │   ├── run_evaluation.py     # Multi-seed router comparison (5 routers × 5 rates × 30 seeds)
+│   ├── tune_unstrict_v2.py   # Lookahead sensitivity sweep for Unstrict FIFO v2 (held-out seeds)
 │   ├── run_realtime_sim.py   # Real-time simulator for the dashboard demo
 │   ├── dashboard.py          # Streamlit operator dashboard
 │   └── plot_evaluation.py    # Generate report-ready plots and tables from results.csv
@@ -79,13 +82,14 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
-All ~60 tests should pass. The router and evaluation tests are the slowest
-(~10s combined); everything else completes in well under a second.
+All ~190 tests should pass except `test_ocr.py::TestRealOCRStub`, which is
+out of date with the current `RealOCRAdapter` signature. The suite takes
+about 20 s; the simulation and evaluation tests are the slowest.
 
 ### Run the routing algorithm evaluation
 
 This is the multi-seed statistical comparison used for the report. Takes
-~3 minutes on 16 cores.
+~4 minutes on 16 cores.
 
 ```bash
 python scripts/run_evaluation.py
@@ -94,6 +98,18 @@ python scripts/run_evaluation.py
 Produces:
 - `results/results.csv` — one row per (router, arrival_rate, seed)
 - `results/statistics.json` — bootstrap CIs and pairwise tests
+
+The primary metric is **time in system** (arrival to departure). Queue wait
+(arrival to gate assignment) is reported too, but on its own it rewards
+sending a truck straight to a slow gate. The first 10 simulated minutes of
+each 2-hour run are discarded as warm-up.
+
+To re-run the sensitivity sweep that chose Unstrict FIFO v2's default
+lookahead (uses seeds 1000–1029, separate from the evaluation's 0–29):
+
+```bash
+python scripts/tune_unstrict_v2.py
+```
 
 To regenerate the plots and report-ready tables from the CSV:
 
@@ -154,28 +170,41 @@ The evaluation uses heavier gate heterogeneity (A=180s, B=90s, C=30s) to
 test routing under realistic depot conditions where lane speeds differ
 significantly.
 
-The unstrict FIFO algorithm exposes one knob: `alpha` (default 0.7),
-controlling the throughput-vs-queue tradeoff. See `src/router.py` docstring
-for details.
+Unstrict FIFO v2 exposes one knob: `lookahead_seconds` (default 90), the
+window of expected arrivals added to the queue when planning. Smaller
+values hold trucks for fast gates more eagerly; larger values use slow
+gates sooner. 60–120 s is a flat optimum in the sensitivity sweep. The FYP1
+router's knob is `alpha` (default 0.7). See the `src/router.py` docstrings.
 
 ## Limitations
 
 
-1. **The queue-balancing term in unstrict FIFO is structurally inactive
-   under the global-queue model used here.** All trucks queue in one global
-   FIFO; gates are assigned at dispatch time. The score formula's
-   queue-length penalty (`-(1-α) · Q_g`) is therefore always zero, and the
-   algorithm reduces to throughput-greedy gate selection. A per-gate-queue
-   deployment would activate the full algorithm — recommended for FYP2.
-2. **Wait-time improvements are modest** (7%–36% reduction over strict
-   FIFO across tested rates), statistically significant only at low load
-   (1.5/min, p=0.006 Bonferroni-corrected). The operational story is the
-   robust load redistribution: Gate A utilization drops ~20pp, Gate C
-   rises ~12pp.
-3. **The OCR pipeline is ~80% accurate** on the current real-image set
+1. **The >25% target is met only at low load.** Unstrict FIFO v2 cuts mean
+   time in system versus strict FIFO by 26.4% at 1.5 trucks/min, then
+   19.3%, 14.7%, 10.6% and 6.4% at 1.8–2.4/min (Bonferroni-corrected
+   Mann-Whitney: significant up to 2.2/min, not at 2.4/min). This is
+   expected: holding a truck for a fast gate only pays when there is spare
+   fast-gate capacity, and as load approaches the depot's total capacity
+   (3 trucks/min in the evaluation config) every policy must use every
+   gate. v2 beats the FYP1 router significantly up to 2.0/min; above that
+   the two are indistinguishable.
+2. **v2 trades queue wait for time in system.** Because it may hold a
+   truck for a faster gate, its mean queue wait is slightly *higher* than
+   strict FIFO's (e.g. 10.1 s vs 7.8 s at 1.5/min) while total time in
+   system is much lower. Judge routing on time in system; FYP1's results
+   reported queue wait only.
+3. **Global queue, not per-gate lanes.** All trucks share one FIFO queue
+   and gates are chosen at dispatch time. This is the theoretically better
+   arrangement (no truck is stuck in the wrong lane), but it means
+   ShortestQueue is meaningless here and the FYP1 router's queue-length
+   term is always zero. v2 uses the queue length in its plan instead.
+4. **Results before FYP2 were affected by a dispatcher bug** that could
+   assign several trucks to one gate in a single dispatch step. FYP1's
+   published numbers should not be compared directly with the current ones.
+5. **The OCR pipeline is ~80% accurate** on the current real-image set
    without fine-tuning. PaddleOCR was used out of the box; fine-tuning on
    the project's labeled container dataset is a recommended next step.
-4. **Synthetic images are for pipeline testing only.** They do not match
+6. **Synthetic images are for pipeline testing only.** They do not match
    the training distribution of CCLN and would not pass through the
    localization stage reliably. The dashboard demo uses real container
    photos from `images/`.
@@ -186,7 +215,7 @@ for details.
 - License plate recognition (YOLOv8 + OCR)
 - OCR accepting a real-time video input instead of images
 - Profile fusion combining all three identification outputs
-- Per-gate queues + algorithm refinement
+- Load-aware routing (service time predicted from the truck's capacity class)
 - PostgreSQL migration
 - Fine-tuned OCR on labeled dataset
 - Production dashboard with operator controls

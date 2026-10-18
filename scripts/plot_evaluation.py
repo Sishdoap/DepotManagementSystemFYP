@@ -25,10 +25,9 @@ PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Consistent ordering and colors across all plots.
-ROUTER_ORDER = ["StrictFIFO", "ShortestQueue", "Random", "UnstrictFIFO", "RoundRobin"]
+ROUTER_ORDER = ["StrictFIFO", "Random", "UnstrictFIFO", "RoundRobin"]
 ROUTER_COLORS = {
     "StrictFIFO":    "#1f77b4",
-    "ShortestQueue": "#2ca02c",
     "Random":        "#9467bd",
     "UnstrictFIFO":  "#d62728",
     "RoundRobin":    "#7f7f7f",

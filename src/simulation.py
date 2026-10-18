@@ -29,6 +29,7 @@ from .db import (
     complete_event,
     insert_container_reading,
     insert_event,
+    mean_service_time,
     record_throughput_sample,
     recent_throughput,
     update_event_assignment,
@@ -370,6 +371,12 @@ class DepotSimulation:
                     is_busy=self.gate_busy[gid],
                     queue_length=0,    # we use a global queue, not per-gate
                     recent_throughput=throughput,
+                    mean_service_seconds=mean_service_time(
+                        self.engine,
+                        gid,
+                        now=self.env.now,
+                        window_seconds=self.config.throughput_window_seconds,
+                    ),
                 )
             )
 

@@ -354,6 +354,39 @@ def recent_throughput(
     trucks = float(result or 0)
     return trucks / (window_seconds / 60.0)
 
+
+def mean_service_time(
+    engine: Engine,
+    gate_id: str,
+    *,
+    now: float,
+    window_seconds: int = 600,
+) -> float | None:
+    """Observed mean service time (seconds) for `gate_id`.
+
+    Uses completions in the last `window_seconds` if there are any, so the
+    estimate tracks a gate whose speed drifts. Falls back to the gate's
+    all-time mean when the window is empty (a routing policy may leave a
+    slow gate idle for a while — that shouldn't erase what we know about
+    it). Returns None only if the gate has never completed a truck.
+    """
+    trucks = func.sum(gate_throughput.c.trucks_served)
+    weighted = func.sum(gate_throughput.c.trucks_served * gate_throughput.c.mean_service_time)
+    base = (
+        select(trucks, weighted)
+        .where(gate_throughput.c.gate_id == gate_id)
+        .where(gate_throughput.c.window_start <= now)
+    )
+    with transaction(engine) as conn:
+        n, total = conn.execute(
+            base.where(gate_throughput.c.window_start >= now - window_seconds)
+        ).one()
+        if not n:
+            n, total = conn.execute(base).one()
+    if not n:
+        return None
+    return float(total) / float(n)
+
 def update_sim_clock(engine: Engine, sim_now: float) -> None:
     """Update the simulator's current time so the dashboard can compute waits."""
     from sqlalchemy.dialects.sqlite import insert as sqlite_insert

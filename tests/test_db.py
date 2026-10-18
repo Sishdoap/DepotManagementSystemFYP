@@ -27,6 +27,7 @@ from src.db import (
     list_recent_containers,
     list_waiting,
     make_engine,
+    mean_service_time,
     recent_throughput,
     record_throughput_sample,
     update_event_assignment,
@@ -186,6 +187,31 @@ class TestThroughput:
         record_throughput_sample(engine, gate_id="B", completed_at=1410.0, service_time=10.0)
         assert recent_throughput(engine, "A", now=1500.0, window_seconds=600) == pytest.approx(0.1)
         assert recent_throughput(engine, "B", now=1500.0, window_seconds=600) == pytest.approx(0.2)
+
+
+class TestMeanServiceTime:
+    def test_never_served_returns_none(self, engine):
+        assert mean_service_time(engine, "A", now=1500.0, window_seconds=600) is None
+
+    def test_weighted_mean_within_window(self, engine):
+        # Two trucks at 10 s in one bucket, one at 40 s in another: mean 20 s.
+        record_throughput_sample(engine, gate_id="A", completed_at=1000.0, service_time=10.0)
+        record_throughput_sample(engine, gate_id="A", completed_at=1010.0, service_time=10.0)
+        record_throughput_sample(engine, gate_id="A", completed_at=1200.0, service_time=40.0)
+        assert mean_service_time(engine, "A", now=1500.0, window_seconds=600) == pytest.approx(20.0)
+
+    def test_window_preferred_over_history(self, engine):
+        record_throughput_sample(engine, gate_id="A", completed_at=100.0, service_time=90.0)
+        record_throughput_sample(engine, gate_id="A", completed_at=1400.0, service_time=30.0)
+        assert mean_service_time(engine, "A", now=1500.0, window_seconds=600) == pytest.approx(30.0)
+
+    def test_falls_back_to_all_time_when_window_empty(self, engine):
+        record_throughput_sample(engine, gate_id="A", completed_at=100.0, service_time=90.0)
+        assert mean_service_time(engine, "A", now=5000.0, window_seconds=600) == pytest.approx(90.0)
+
+    def test_per_gate_isolation(self, engine):
+        record_throughput_sample(engine, gate_id="B", completed_at=1400.0, service_time=30.0)
+        assert mean_service_time(engine, "A", now=1500.0, window_seconds=600) is None
 
 
 class TestSchemaPortability:

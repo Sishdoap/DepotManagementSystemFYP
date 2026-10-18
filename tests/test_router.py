@@ -115,6 +115,33 @@ class TestUnstrictFIFO:
         assert decision is not None
         assert "starvation" in decision.reason.lower()
 
+    def test_starvation_guard_picks_best_free_gate(self):
+        router = UnstrictFIFORouter(max_wait_seconds=60)
+        state = make_state(
+            ("A", False, 0, 1.0),
+            ("B", True, 0, 9.0),
+            ("C", False, 0, 6.0),
+            head_wait=300.0,
+        )
+        assert router.choose(state).gate_id == "C"
+
+    def test_quiet_gate_with_history_is_not_rebootstrapped(self):
+        # A has served trucks before but none in the current window. It
+        # should be scored (and lose), not force-fed as if it were new.
+        router = UnstrictFIFORouter(alpha=0.7)
+        state = RouterState(
+            gates=[
+                GateState("A", False, 0, 0.0, mean_service_seconds=180.0),
+                GateState("C", False, 0, 2.0, mean_service_seconds=30.0),
+            ],
+            global_queue_length=1,
+            head_truck_wait_seconds=0.0,
+            now=1000.0,
+        )
+        decision = router.choose(state)
+        assert decision.gate_id == "C"
+        assert "bootstrap" not in decision.reason.lower()
+
     def test_bootstrap_picks_unseen_gate(self):
         # Gate C has no throughput history yet — should be picked over A/B.
         router = UnstrictFIFORouter(alpha=0.7)
@@ -204,6 +231,20 @@ class TestStrictFIFO:
             ("C", False, 0, 5.0),
         )
         assert router.choose(state).gate_id == "B"
+
+    def test_rng_tie_break_uses_every_free_gate(self):
+        router = StrictFIFORouter(rng=random.Random(0))
+        gates = [("A", False, 0, 5.0), ("B", True, 0, 5.0), ("C", False, 0, 5.0)]
+        picks = {router.choose(make_state(*gates)).gate_id for _ in range(200)}
+        assert picks == {"A", "C"}
+
+    def test_rng_tie_break_reproducible(self):
+        gates = [("A", False, 0, 5.0), ("B", False, 0, 5.0), ("C", False, 0, 5.0)]
+        r1 = StrictFIFORouter(rng=random.Random(7))
+        r2 = StrictFIFORouter(rng=random.Random(7))
+        seq1 = [r1.choose(make_state(*gates)).gate_id for _ in range(20)]
+        seq2 = [r2.choose(make_state(*gates)).gate_id for _ in range(20)]
+        assert seq1 == seq2
 
 
 class TestRoundRobin:

@@ -7,7 +7,8 @@ Defines a Router abstract base class and five concrete implementations:
     StrictFIFORouter        — baseline: head-of-queue to any free gate.
     RoundRobinRouter        — baseline: cycle gates A, B, C, A, B, C ...
     RandomRouter            — baseline: uniform random over gates.
-    ShortestQueueRouter     — baseline: pick the gate with fewest trucks.
+    ShortestQueueRouter     — baseline: pick the gate with fewest trucks
+                              (per-gate queues only; not evaluated).
 
 All routers are pure functions of state — they take a RouterState snapshot
 and return a Decision. They do not own queues, gates, or the database;
@@ -31,6 +32,7 @@ class GateState:
     is_busy: bool              # True if currently serving a truck
     queue_length: int          # trucks waiting at this gate (0 if global queue)
     recent_throughput: float   # trucks per minute over the configured window
+    mean_service_seconds: Optional[float] = None  # observed mean; None if never served
 
 
 @dataclass(frozen=True)
@@ -95,9 +97,12 @@ class UnstrictFIFORouter(Router):
     Algorithm:
         1. If no gates are free, return None (caller waits).
         2. If the head truck has waited more than `max_wait_seconds`, send it
-           to any free gate immediately (starvation guard).
-        3. If any free gate has zero recent throughput history, send the
-           truck there (bootstrap; gather data before scoring).
+           to the free gate with the best recent throughput immediately
+           (starvation guard).
+        3. If any free gate has never served a truck, send the truck there
+           (bootstrap; gather data before scoring). A gate that has served
+           before but is quiet in the current window is *not* re-bootstrapped
+           — it is scored, and its zero throughput ranks it last.
         4. Otherwise, compute for each free gate:
                score(g) = alpha * norm(throughput_g) - (1-alpha) * norm(queue_g)
            where norm() is min-max normalization across the free gates.
@@ -137,14 +142,17 @@ class UnstrictFIFORouter(Router):
 
         # Starvation guard.
         if state.head_truck_wait_seconds > self._max_wait:
-            chosen = free[0]
+            chosen = max(free, key=lambda g: (g.recent_throughput, g.gate_id))
             return Decision(
                 gate_id=chosen.gate_id,
                 reason=f"starvation guard: head truck waited {state.head_truck_wait_seconds:.0f}s",
             )
 
-        # Bootstrap: prefer any free gate with no throughput history.
-        unseen = [g for g in free if g.recent_throughput == 0.0]
+        # Bootstrap: prefer any free gate that has never served a truck.
+        unseen = [
+            g for g in free
+            if g.recent_throughput == 0.0 and g.mean_service_seconds is None
+        ]
         if unseen:
             # Pick the one with the shortest queue among bootstrap candidates.
             chosen = min(unseen, key=lambda g: g.queue_length)
@@ -177,11 +185,18 @@ class UnstrictFIFORouter(Router):
 # --- Baselines ---
 
 class StrictFIFORouter(Router):
-    """Head-of-queue assigned to whichever gate is free first.
+    """Head-of-queue assigned to whichever gate is free.
 
-    Among multiple free gates, picks deterministically by gate_id (alphabetical)
-    so the baseline is reproducible.
+    When several gates are free, the tie-break must not depend on gate
+    names: breaking ties alphabetically happens to favour slow Gate A in
+    the evaluation config, which would make this baseline look worse than
+    a real strict-FIFO depot. Pass an `rng` to break ties uniformly at
+    random (what the evaluation does). Without one, ties fall back to
+    gate_id order, which keeps unit tests deterministic.
     """
+
+    def __init__(self, rng: Optional[random.Random] = None):
+        self._rng = rng
 
     @property
     def name(self) -> str:
@@ -193,8 +208,11 @@ class StrictFIFORouter(Router):
         free = _free_gates(state)
         if not free:
             return None
-        chosen = min(free, key=lambda g: g.gate_id)
-        return Decision(gate_id=chosen.gate_id, reason="strict FIFO: first free gate")
+        if self._rng is None:
+            chosen = min(free, key=lambda g: g.gate_id)
+        else:
+            chosen = self._rng.choice(sorted(free, key=lambda g: g.gate_id))
+        return Decision(gate_id=chosen.gate_id, reason="strict FIFO: next free gate")
 
 
 class RoundRobinRouter(Router):
@@ -253,7 +271,13 @@ class RandomRouter(Router):
 
 
 class ShortestQueueRouter(Router):
-    """Send to the gate with the fewest waiting trucks. Ties broken by gate_id."""
+    """Send to the gate with the fewest waiting trucks. Ties broken by gate_id.
+
+    Only meaningful with per-gate queues. Under the simulator's single global
+    queue every gate reports queue_length=0, so this degenerates to
+    StrictFIFO's alphabetical tie-break and produces identical results; it
+    is therefore excluded from the evaluation roster.
+    """
 
     @property
     def name(self) -> str:

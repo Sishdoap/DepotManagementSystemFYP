@@ -1,4 +1,4 @@
-"""Run the full evaluation: 5 routers × 5 rates × 30 seeds."""
+"""Run the full evaluation: every router × 5 arrival rates × 30 seeds."""
 
 import random
 import sys
@@ -22,7 +22,6 @@ from src.evaluation import (
 from src.router import (
     RandomRouter,
     RoundRobinRouter,
-    ShortestQueueRouter,
     StrictFIFORouter,
     UnstrictFIFORouter,
 )
@@ -30,7 +29,8 @@ from src.router import (
 
 # Module-level builder functions — picklable, unlike lambdas.
 def build_strict_fifo(seed: int):
-    return StrictFIFORouter()
+    # Random tie-break so the baseline doesn't depend on gate names.
+    return StrictFIFORouter(rng=random.Random(seed))
 
 def build_unstrict_fifo(seed: int):
     return UnstrictFIFORouter(alpha=0.7)
@@ -41,16 +41,14 @@ def build_round_robin(seed: int):
 def build_random(seed: int):
     return RandomRouter(rng=random.Random(seed))
 
-def build_shortest_queue(seed: int):
-    return ShortestQueueRouter()
 
-
+# ShortestQueue is omitted: with one global queue it is identical to
+# StrictFIFO with alphabetical tie-breaks (see ShortestQueueRouter).
 ROUTERS = {
     "StrictFIFO":    build_strict_fifo,
     "UnstrictFIFO":  build_unstrict_fifo,
     "RoundRobin":    build_round_robin,
     "Random":        build_random,
-    "ShortestQueue": build_shortest_queue,
 }
 
 

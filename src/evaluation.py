@@ -68,6 +68,7 @@ class RunRecord:
     n_arrivals: int
     n_completed: int
     n_unfinished: int
+    n_held: int              # trucks deliberately held while a gate was free
     mean_sojourn: float      # time in system: primary congestion metric
     p95_sojourn: float
     mean_wait: float         # queue wait only (excludes time spent at the gate)
@@ -127,6 +128,7 @@ def _run_one(args) -> RunRecord:
         n_arrivals=r.n_arrivals,
         n_completed=r.n_completed,
         n_unfinished=r.n_unfinished,
+        n_held=r.n_held,
         mean_sojourn=statistics.mean(sojourns),
         p95_sojourn=pct(sojourns, 0.95),
         mean_wait=statistics.mean(waits),

@@ -65,7 +65,16 @@ class Decision:
 # --- Abstract base ---
 
 class Router(ABC):
-    """Every router must implement `choose`."""
+    """Every router must implement `choose`.
+
+    `hold_reason` explains the most recent `choose()` call that returned
+    None *by choice* — i.e. a gate was free but the router decided the head
+    truck should wait. It is None otherwise. Only routers that can hold
+    (UnstrictFIFOv2Router) ever set it; the simulator logs it so the
+    dashboard can show why a free gate isn't being used.
+    """
+
+    hold_reason: Optional[str] = None
 
     @abstractmethod
     def choose(self, state: RouterState) -> Optional[Decision]:
@@ -259,6 +268,7 @@ class UnstrictFIFOv2Router(Router):
         return f"UnstrictFIFOv2(lookahead={self._lookahead:g}s)"
 
     def choose(self, state: RouterState) -> Optional[Decision]:
+        self.hold_reason = None
         if state.global_queue_length == 0:
             return None
 
@@ -303,14 +313,25 @@ class UnstrictFIFOv2Router(Router):
 
         free_ids = {g.gate_id for g in free}
         used_free: set[str] = set()
-        for _ in range(n_plan):
+        head_gate, head_start = None, state.now
+        for i in range(n_plan):
             gid = min(avail, key=lambda k: (avail[k] + service[k], service[k], k))
+            if i == 0:
+                head_gate, head_start = gid, avail[gid]
             if gid in free_ids and avail[gid] == state.now:
                 used_free.add(gid)
             avail[gid] += service[gid]
 
         if not used_free:
-            return None    # hold: a busy gate is expected to clear the truck sooner
+            # Hold: a busy gate is expected to clear the head truck sooner.
+            best_free = min(free_ids, key=lambda k: (service[k], k))
+            wait = head_start - state.now
+            self.hold_reason = (
+                f"holding for gate {head_gate}: free in ~{wait:.0f}s, done in "
+                f"~{wait + service[head_gate]:.0f}s vs ~{service[best_free]:.0f}s at "
+                f"{best_free}; keeping {','.join(sorted(free_ids))} in reserve"
+            )
+            return None
 
         chosen_id = min(used_free, key=lambda k: (service[k], k))
         held_back = sorted(free_ids - used_free)

@@ -31,6 +31,7 @@ from src.db import (
     recent_arrival_rate,
     recent_throughput,
     record_throughput_sample,
+    set_waiting_note,
     update_event_assignment,
 )
 
@@ -213,6 +214,19 @@ class TestMeanServiceTime:
     def test_per_gate_isolation(self, engine):
         record_throughput_sample(engine, gate_id="B", completed_at=1400.0, service_time=30.0)
         assert mean_service_time(engine, "A", now=1500.0, window_seconds=600) is None
+
+
+class TestWaitingNote:
+    def test_note_set_on_waiting_truck(self, engine):
+        eid = insert_event(engine, plate="W1", arrived_at=100.0)
+        set_waiting_note(engine, eid, "holding for gate C")
+        assert list_waiting(engine)[0].routing_reason == "holding for gate C"
+
+    def test_note_ignored_once_assigned(self, engine):
+        eid = insert_event(engine, plate="W1", arrived_at=100.0)
+        update_event_assignment(engine, eid, gate="C", assigned_at=110.0, routing_reason="chosen")
+        set_waiting_note(engine, eid, "holding for gate C")
+        assert list_at_gate(engine)[0].routing_reason == "chosen"
 
 
 class TestArrivalRate:

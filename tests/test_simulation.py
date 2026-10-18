@@ -257,6 +257,25 @@ class TestUnstrictFIFOv2Behavior:
         v2 = self._run(UnstrictFIFOv2Router(lookahead_seconds=0))
         assert v2.per_gate_throughput["A"] < strict.per_gate_throughput["A"]
 
+    def test_holds_are_counted_and_logged(self, monkeypatch):
+        import src.simulation as simulation
+        notes: list[tuple[int, str]] = []
+        original = simulation.set_waiting_note
+
+        def recording(engine, event_id, note):
+            notes.append((event_id, note))
+            original(engine, event_id, note)
+
+        monkeypatch.setattr(simulation, "set_waiting_note", recording)
+        v2 = self._run(UnstrictFIFOv2Router(lookahead_seconds=0))
+        assert v2.n_held > 0
+        assert notes and all(n.startswith("holding for gate") for _, n in notes)
+        # Each held truck is counted once, however many notes it receives.
+        assert v2.n_held <= len({eid for eid, _ in notes})
+
+    def test_strict_fifo_never_holds(self):
+        assert self._run(StrictFIFORouter()).n_held == 0
+
     def test_v2_reduces_time_in_system(self):
         import statistics
         strict = self._run(StrictFIFORouter())

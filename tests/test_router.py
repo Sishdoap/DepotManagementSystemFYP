@@ -91,6 +91,12 @@ class TestRouterContract:
             assert decision is not None
             assert decision.gate_id == "B"
 
+    def test_waiting_for_busy_gates_is_not_a_hold(self, name, factory):
+        router = factory()
+        state = make_state(("A", True, 0, 5.0), ("B", True, 0, 4.0))
+        assert router.choose(state) is None
+        assert router.hold_reason is None
+
     def test_decision_has_reason(self, name, factory):
         router = factory()
         state = make_state(("A", False, 0, 5.0))
@@ -292,6 +298,23 @@ class TestUnstrictFIFOv2:
         assert decision.gate_id == "C"
         assert "plan" in decision.reason
         assert "reserve" in decision.reason and "A" in decision.reason
+
+    def test_hold_reason_explains_hold(self):
+        router = UnstrictFIFOv2Router(lookahead_seconds=0)
+        state = v2_state(("A", False, 180.0, 0.0), ("C", True, 30.0, 20.0))
+        assert router.choose(state) is None
+        assert router.hold_reason is not None
+        assert "holding for gate C" in router.hold_reason
+        assert "A" in router.hold_reason
+
+    def test_hold_reason_cleared_when_dispatching_or_no_gate_free(self):
+        router = UnstrictFIFOv2Router(lookahead_seconds=0)
+        router.choose(v2_state(("A", False, 180.0, 0.0), ("C", True, 30.0, 20.0)))
+        assert router.choose(v2_state(("A", False, 180.0, 0.0), ("C", False, 30.0, 0.0))) is not None
+        assert router.hold_reason is None
+        router.choose(v2_state(("A", False, 180.0, 0.0), ("C", True, 30.0, 20.0)))
+        assert router.choose(v2_state(("A", True, 180.0, 5.0), ("C", True, 30.0, 20.0))) is None
+        assert router.hold_reason is None    # nothing free: waiting, not holding
 
     def test_negative_lookahead_rejected(self):
         with pytest.raises(ValueError):

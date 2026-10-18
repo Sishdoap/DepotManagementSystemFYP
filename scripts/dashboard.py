@@ -61,13 +61,14 @@ def get_engine():
 
 
 def fetch_waiting(engine, sim_now: float) -> pd.DataFrame:
+    # routing_reason holds the router's hold explanation while a truck waits.
     sql = (
-        "SELECT id, plate, arrived_at, "
-        f"       ({sim_now} - arrived_at) AS waited_s "
+        "SELECT id, plate, arrived_at, routing_reason, "
+        "       (:sim_now - arrived_at) AS waited_s "
         "FROM events WHERE status='waiting' ORDER BY arrived_at"
     )
     with engine.begin() as conn:
-        df = pd.read_sql_query(text(sql), conn)
+        df = pd.read_sql_query(text(sql), conn, params={"sim_now": sim_now})
     return df
 
 
@@ -236,9 +237,14 @@ with col_left:
     if waiting.empty:
         st.caption("Queue is empty.")
     else:
-        display = waiting[["plate", "waited_s"]].rename(
-            columns={"plate": "Plate", "waited_s": "Waited (s)"}
+        # A held head truck explains why a gate can be free while trucks wait.
+        head_note = waiting.iloc[0]["routing_reason"]
+        if isinstance(head_note, str) and head_note:
+            st.info(f"⏸ **{waiting.iloc[0]['plate']}** — {head_note}")
+        display = waiting[["plate", "waited_s", "routing_reason"]].rename(
+            columns={"plate": "Plate", "waited_s": "Waited (s)", "routing_reason": "Note"}
         )
+        display["Note"] = display["Note"].fillna("")
         st.dataframe(display, hide_index=True, width="stretch")
 
 with col_right:

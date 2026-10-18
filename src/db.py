@@ -223,6 +223,22 @@ def update_event_assignment(
         )
 
 
+def set_waiting_note(engine: Engine, event_id: int, note: str) -> None:
+    """Record why a waiting truck is being held (shown on the dashboard).
+
+    Stored in `routing_reason` while the truck is still waiting; replaced by
+    the actual routing decision when it is assigned to a gate. Has no
+    effect once the truck has left the queue.
+    """
+    with transaction(engine) as conn:
+        conn.execute(
+            events.update()
+            .where(events.c.id == event_id)
+            .where(events.c.status == "waiting")
+            .values(routing_reason=note)
+        )
+
+
 def complete_event(engine: Engine, event_id: int, departed_at: float) -> None:
     """Mark an event as completed."""
     with transaction(engine) as conn:

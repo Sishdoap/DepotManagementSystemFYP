@@ -33,6 +33,7 @@ from .db import (
     recent_arrival_rate,
     record_throughput_sample,
     recent_throughput,
+    set_waiting_note,
     update_event_assignment,
 )
 from .ocr import OCRAdapter, OCRResult
@@ -88,6 +89,7 @@ class Truck:
     assigned_gate: Optional[str] = None
     assigned_at: Optional[float] = None
     departed_at: Optional[float] = None
+    hold_note: Optional[str] = None             # last hold reason logged for this truck
 
 
 # --- Results ---
@@ -107,6 +109,7 @@ class SimulationResult:
     n_arrivals: int
     n_completed: int
     n_unfinished: int            # arrived but still queued or in service at the end
+    n_held: int                  # trucks the router deliberately held while a gate was free
     n_recoveries: int            # trucks whose OCR was recovered (raw != recovered)
     n_ocr_valid: int             # trucks whose container code came out valid
     wait_times: list[float]      # per-truck queue wait (assigned_at - arrived_at), trucks that reached a gate
@@ -189,6 +192,7 @@ class DepotSimulation:
         self._gate_completion_count: dict[str, int] = {g: 0 for g in self.gates}
         self._n_arrivals = 0
         self._n_completed = 0
+        self._n_held = 0
         self._n_recoveries = 0
         self._n_ocr_valid = 0
 
@@ -245,6 +249,7 @@ class DepotSimulation:
                 state = self._snapshot_state()
                 decision = self.router.choose(state)
                 if decision is None:
+                    self._log_hold(self.waiting[0], self.router.hold_reason)
                     break
                 # Mark the gate busy *now*. The gate's own process doesn't run
                 # until this loop yields, so without this the next snapshot
@@ -414,6 +419,19 @@ class DepotSimulation:
         sample = self._rng_service.gauss(gc.mean_service_seconds, gc.std_service_seconds)
         return max(0.1, sample)
 
+    def _log_hold(self, truck: Truck, reason: Optional[str]) -> None:
+        """Persist why the head truck is being held, if the router held it.
+
+        Only writes when the reason changes, so a truck held across several
+        dispatcher wake-ups doesn't rewrite the same note each time.
+        """
+        if reason is None or reason == truck.hold_note:
+            return
+        if truck.hold_note is None and self._measured(truck):
+            self._n_held += 1
+        truck.hold_note = reason
+        set_waiting_note(self.engine, truck.event_id, reason)
+
     def _measured(self, truck: Truck) -> bool:
         """Whether a truck counts towards statistics (arrived after warm-up)."""
         return truck.arrived_at >= self.config.warmup_seconds
@@ -440,6 +458,7 @@ class DepotSimulation:
             n_arrivals=self._n_arrivals,
             n_completed=self._n_completed,
             n_unfinished=self._n_arrivals - self._n_completed,
+            n_held=self._n_held,
             n_recoveries=self._n_recoveries,
             n_ocr_valid=self._n_ocr_valid,
             wait_times=list(self._wait_times),

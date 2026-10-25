@@ -80,6 +80,16 @@ class OCRResult:
     recovery_edits: Optional[int]
     log_probability: Optional[float]
     latency_ms: float
+    # How the code was established: "verified" (raw read passed the check
+    # digit), "recovered" (fixed, check digit untouched so still verified),
+    # "inferred" (check digit missing/garbled and computed from the other
+    # ten characters — NOT verified), or "failed". None for adapters that
+    # don't report it.
+    validation_status: Optional[str] = None
+    size_type: Optional[str] = None     # ISO 6346 size/type code if read, e.g. "45G1"
+    # Raw (text, confidence) fragments per rotation tried, for offline
+    # re-evaluation of the code-reading logic without re-running OCR.
+    fragments_by_rotation: Optional[dict[int, list[tuple[str, float]]]] = None
 
     @property
     def succeeded(self) -> bool:
@@ -247,11 +257,13 @@ class RealOCRAdapter(OCRAdapter):
     a single image. The adapter accepts ndarray (the existing OCRAdapter
     contract) and converts internally, so the simulator interface is unchanged.
 
-    Recovery: this adapter uses the OCR-confusion-aware substitution recovery
-    from your existing predict_paddle.py pipeline (correct_to_valid_iso6346),
-    not the beam-search recovery in iso6346.py. PaddleOCR doesn't expose
-    per-character probability distributions, so distribution-guided recovery
-    is not applicable to this pipeline.
+    Code reading: PaddleOCR's text fragments go through
+    src/iso6346_recovery.read_container_code (fragment reordering, size/type
+    stripping, minimal-edit recovery, check-digit inference), not the
+    beam-search recovery in iso6346.py — PaddleOCR doesn't expose
+    per-character probability distributions. The result's
+    `validation_status` says whether the code is verified, recovered,
+    inferred (unverified) or failed.
     """
 
     def __init__(
@@ -262,6 +274,8 @@ class RealOCRAdapter(OCRAdapter):
         paddle_gpu: bool = False,
         use_localization: bool = True,
         try_rotations: bool = True,
+        try_all_rotations: bool = False,
+        reader_config=None,
     ):
         """
         Args:
@@ -274,6 +288,10 @@ class RealOCRAdapter(OCRAdapter):
                 synthetic images).
             try_rotations: if True, try 0/90/180/270° and pick the best.
                 Slower but recovers vertical/upside-down codes.
+            try_all_rotations: if True, run every rotation even after one
+                yields a valid code, so `fragments_by_rotation` is complete.
+                For benchmarking only — about 4x slower.
+            reader_config: iso6346_recovery.ReaderConfig; None for defaults.
         """
         # Imports are local because torch/paddle are heavy and we only want
         # to pay the import cost when the real adapter is actually used.
@@ -292,7 +310,10 @@ class RealOCRAdapter(OCRAdapter):
         self._paddle = self._init_paddle(paddle_gpu)
         self._use_localization = use_localization
         self._try_rotations = try_rotations
+        self._try_all_rotations = try_all_rotations
         self._ccln_weights_path = ccln_weights_path
+        from src.iso6346_recovery import DEFAULT_CONFIG
+        self._reader_config = reader_config or DEFAULT_CONFIG
 
     @property
     def name(self) -> str:
@@ -342,7 +363,7 @@ class RealOCRAdapter(OCRAdapter):
         bbox_px, crop = self._localize_and_crop(pil)
 
         # Stage 2: recognition with rotation search.
-        code, raw_uncorrected, valid, fragments, rotation = self._recognize(crop)
+        reading, fragments, by_rotation = self._recognize(crop)
 
         # Build OCRResult. We don't have per-position distributions from
         # PaddleOCR, so several fields stay None.
@@ -362,25 +383,23 @@ class RealOCRAdapter(OCRAdapter):
         )
 
         latency_ms = (time.perf_counter() - start) * 1000.0
-        
-        # Compute recovery edits: how many characters differ between the raw
-        # OCR output and the final (possibly corrected) code. Zero if no
-        # correction was needed.
-        if code and raw_uncorrected and len(code) == len(raw_uncorrected):
-            edits = sum(a != b for a, b in zip(code, raw_uncorrected))
-        else:
-            edits = None
 
+        from src.iso6346_recovery import clean
         return OCRResult(
-            raw_string=raw_uncorrected,     # was `code` — now correctly shows pre-recovery read
+            # What OCR actually saw (cleaned, in reading order), before any fixes.
+            raw_string="".join(clean(t) for t, _ in fragments),
             distributions=None,
             char_list=STANDARD_CHAR_LIST,
             bounding_box=bbox,
-            recovered_code=code if valid else None,
-            is_valid=valid,
-            recovery_edits=edits,
+            # Set for inferred codes too; is_valid says whether it is confirmed.
+            recovered_code=reading.code,
+            is_valid=reading.is_validated,
+            recovery_edits=reading.edits if reading.code else None,
             log_probability=float(np.log(mean_conf)) if mean_conf > 0 else None,
             latency_ms=latency_ms,
+            validation_status=reading.status,
+            size_type=reading.size_type,
+            fragments_by_rotation=by_rotation,
         )
 
     # ---- internals (port of predict_paddle.py logic, adapted for in-process use) ----
@@ -419,21 +438,30 @@ class RealOCRAdapter(OCRAdapter):
         return int(x1 * W), int(y1 * H), int(x2 * W), int(y2 * H)
 
     def _recognize(self, crop_pil):
+        """Read the code at each rotation; keep the strongest reading.
+
+        Stops at the first validated (verified/recovered) reading unless
+        `try_all_rotations`. An inferred reading doesn't stop the search: a
+        later rotation may still verify.
+        """
+        from src.iso6346_recovery import read_container_code, reading_key
+
         rotations = [0, 90, 180, 270] if self._try_rotations else [0]
-        # Best result across rotations. Tuple is:
-        # (final_code, raw_uncorrected, valid, fragments, rotation, score)
-        best = ("", "", False, [], 0, -1.0)
+        best, best_frags, best_key = None, [], None
+        by_rotation: dict[int, list[tuple[str, float]]] = {}
 
         for rot in rotations:
             rotated = crop_pil if rot == 0 else crop_pil.rotate(rot, expand=True)
             fragments = self._ocr_one(rotated)
-            code, raw_uncorrected, valid, score = self._best_from_fragments(fragments)
-            if score > best[5]:
-                best = (code, raw_uncorrected, valid, fragments, rot, score)
-            if valid:
+            by_rotation[rot] = fragments
+            reading = read_container_code(fragments, self._reader_config)
+            key = reading_key(reading, fragments)
+            if best_key is None or key > best_key:
+                best, best_frags, best_key = reading, fragments, key
+            if reading.is_validated and not self._try_all_rotations:
                 break
 
-        return best[0], best[1], best[2], best[3], best[4]
+        return best, best_frags, by_rotation
 
     def _ocr_one(self, crop_pil):
         arr = np.array(crop_pil)
@@ -442,58 +470,6 @@ class RealOCRAdapter(OCRAdapter):
         else:
             raw = self._paddle.ocr(arr, cls=True)
         return list(_flatten_paddle_result(raw))
-
-    @staticmethod
-    def _best_from_fragments(fragments):
-        from src.iso6346_recovery import (
-            correct_to_valid_iso6346,
-            is_valid_container_code,
-            CONTAINER_RE,
-        )
-        import re
-
-        cleaned = [(re.sub(r"[^A-Z0-9]", "", t.upper()), c) for t, c in fragments]
-        cleaned = [(t, c) for t, c in cleaned if t]
-        if not cleaned:
-            return ("", "", False, 0.0)
-
-        joined = "".join(t for t, _ in cleaned)
-        mean_conf = sum(c for _, c in cleaned) / len(cleaned)
-
-        candidates = []
-        for t, _ in cleaned:
-            for m in CONTAINER_RE.finditer(t):
-                candidates.append(m.group())
-        for m in CONTAINER_RE.finditer(joined):
-            candidates.append(m.group())
-
-        # Use the first regex hit as the "raw" reading (what OCR saw before any
-        # correction). If no regex hit, use the joined cleaned string.
-        raw_uncorrected = candidates[0] if candidates else joined
-
-        # Tier 1: any regex hit that already passes ISO 6346.
-        for code in candidates:
-            if is_valid_container_code(code):
-                return (code, raw_uncorrected, True, 1000.0 + mean_conf)
-
-        # Tier 1.5: OCR-confusion correction on regex matches.
-        for code in candidates:
-            corrected = correct_to_valid_iso6346(code)
-            if corrected:
-                return (corrected, raw_uncorrected, True, 900.0 + mean_conf)
-
-        # Tier 1.6: correction on the joined string.
-        if len(joined) >= 11:
-            for i in range(len(joined) - 10):
-                corrected = correct_to_valid_iso6346(joined[i : i + 11])
-                if corrected:
-                    return (corrected, raw_uncorrected, True, 800.0 + mean_conf)
-
-        if candidates:
-            return (candidates[0], raw_uncorrected, False, mean_conf)
-
-        return (max((t for t, _ in cleaned), key=len), raw_uncorrected, False, mean_conf * 0.1)
-
 
 def _flatten_paddle_result(result):
     """Yield (text, confidence). Handles PaddleOCR 2.x and 3.x output shapes."""

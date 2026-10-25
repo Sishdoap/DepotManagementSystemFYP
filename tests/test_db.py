@@ -116,6 +116,27 @@ class TestContainerReadings:
         assert readings[0]["raw_code"] == "CSQU3054384"
         assert readings[0]["recovered_code"] == "CSQU3054383"
 
+    def test_inferred_reading_stores_status_and_size_type(self, engine):
+        # Check digit computed rather than read: code kept, not marked valid.
+        eid = insert_event(engine, plate="WX1", arrived_at=1000.0)
+        insert_container_reading(
+            engine,
+            event_id=eid,
+            raw_code="MEDU22918445G1",
+            recovered_code="MEDU2291844",
+            is_valid=False,
+            recovery_edits=1,
+            log_probability=None,
+            recorded_at=1010.0,
+            validation_status="inferred",
+            size_type="45G1",
+        )
+        reading = list_recent_containers(engine)[0]
+        assert reading["validation_status"] == "inferred"
+        assert reading["size_type"] == "45G1"
+        assert reading["is_valid"] == 0
+        assert reading["raw_code"] == "MEDU22918445G1"   # longer than the old 16-char limit
+
     def test_insert_unrecoverable_reading(self, engine):
         # OCR failed entirely — recovered_code is None, is_valid is False.
         eid = insert_event(engine, plate="WX1", arrived_at=1000.0)

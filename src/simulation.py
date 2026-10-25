@@ -292,7 +292,7 @@ class DepotSimulation:
                 from .dashboard_io import write_gate_frame
                 annotation = (
                     f"Gate {gate_id} | {ocr_result.recovered_code or '???'}"
-                    f" | valid={ocr_result.is_valid}"
+                    f" | {ocr_result.validation_status or ('valid' if ocr_result.is_valid else 'invalid')}"
                 )
                 # Pass CCLN's bbox through to the dashboard for visualization.
                 # MockOCRAdapter returns a fake bbox at (10, 10, 200, 40), which
@@ -320,6 +320,8 @@ class DepotSimulation:
                 recovery_edits=ocr_result.recovery_edits,
                 log_probability=ocr_result.log_probability,
                 recorded_at=self.env.now,
+                validation_status=ocr_result.validation_status,
+                size_type=ocr_result.size_type,
             )
             if ocr_result.is_valid:
                 self._n_ocr_valid += 1

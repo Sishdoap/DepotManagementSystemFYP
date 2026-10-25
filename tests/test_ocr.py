@@ -138,10 +138,71 @@ class TestMockOCRStructure:
         assert "0.05" in ocr.name
 
 
-class TestRealOCRStub:
-    def test_real_adapter_raises_until_integrated(self):
-        with pytest.raises(NotImplementedError):
-            RealOCRAdapter("nonexistent_detector.pt", "nonexistent_transcriber.pt")
+def _fake_real_adapter(fragments_by_rotation, *, try_all=False):
+    """RealOCRAdapter with the models replaced by canned OCR fragments."""
+    from PIL import Image
+    from src.iso6346_recovery import DEFAULT_CONFIG
+
+    adapter = RealOCRAdapter.__new__(RealOCRAdapter)   # skip model loading
+    adapter._try_rotations = True
+    adapter._try_all_rotations = try_all
+    adapter._reader_config = DEFAULT_CONFIG
+    adapter._use_localization = False
+    calls = []
+
+    def fake_ocr_one(crop):
+        rot = [0, 90, 180, 270][len(calls)]
+        calls.append(rot)
+        return fragments_by_rotation.get(rot, [])
+
+    adapter._ocr_one = fake_ocr_one
+    adapter._calls = calls
+    adapter._image = Image.new("RGB", (40, 20))
+    return adapter
+
+
+class TestRealOCRRotationSearch:
+    """Rotation selection in RealOCRAdapter, without loading CCLN/PaddleOCR."""
+
+    def test_stops_at_first_validated_rotation(self):
+        adapter = _fake_real_adapter({0: [("TEMU", 0.9), ("6372145", 0.9)]})
+        result = adapter.predict(adapter._image)
+        assert adapter._calls == [0]
+        assert result.recovered_code == "TEMU6372145"
+        assert result.validation_status == "verified"
+        assert result.is_valid
+
+    def test_inferred_reading_keeps_searching(self):
+        adapter = _fake_real_adapter({
+            0: [("MEDU229184", 0.9)],                 # check digit dropped -> inferred
+            90: [("garbage", 0.5)],
+            180: [("MEDU", 0.8), ("2291844", 0.8)],   # verifies
+        })
+        result = adapter.predict(adapter._image)
+        assert adapter._calls == [0, 90, 180]
+        assert result.validation_status == "verified"
+        assert result.recovered_code == "MEDU2291844"
+
+    def test_inferred_result_is_not_valid(self):
+        adapter = _fake_real_adapter({0: [("MEDU229184", 0.9)]})
+        result = adapter.predict(adapter._image)
+        assert result.validation_status == "inferred"
+        assert result.recovered_code == "MEDU2291844"
+        assert not result.is_valid
+
+    def test_all_rotations_recorded_when_requested(self):
+        adapter = _fake_real_adapter({0: [("TEMU", 0.9), ("6372145", 0.9)]}, try_all=True)
+        result = adapter.predict(adapter._image)
+        assert adapter._calls == [0, 90, 180, 270]
+        assert set(result.fragments_by_rotation) == {0, 90, 180, 270}
+
+    def test_raw_string_is_what_ocr_saw(self):
+        adapter = _fake_real_adapter({0: [("bm0u", 0.9), ("5075452", 0.9)]})
+        result = adapter.predict(adapter._image)
+        assert result.raw_string == "BM0U5075452"
+        assert result.recovered_code == "BMOU5075452"
+        assert result.validation_status == "recovered"
+        assert result.recovery_edits == 1
 
 
 class TestErrorTypes:

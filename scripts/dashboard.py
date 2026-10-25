@@ -83,16 +83,17 @@ def fetch_at_gate(engine) -> pd.DataFrame:
 
 
 def fetch_recent_containers(engine, limit=20) -> pd.DataFrame:
-    sql = f"""
+    sql = """
         SELECT c.recorded_at, e.plate, e.assigned_gate AS gate,
-               c.raw_code, c.recovered_code, c.is_valid, c.recovery_edits
+               c.raw_code, c.recovered_code, c.is_valid, c.recovery_edits,
+               c.validation_status, c.size_type
         FROM containers c
         JOIN events e ON c.event_id = e.id
         ORDER BY c.recorded_at DESC
-        LIMIT {limit}
+        LIMIT :limit
     """
     with engine.begin() as conn:
-        df = pd.read_sql_query(text(sql), conn)
+        df = pd.read_sql_query(text(sql), conn, params={"limit": limit})
     return df
 
 
@@ -258,18 +259,26 @@ with col_right:
             code = row["recovered_code"]
             # pandas NaN is truthy; treat it the same as None.
             if pd.isna(code) or code is None or code == "":
-                code_str = "(unrecoverable)"
-            else:
-                code_str = str(code)
-            return f"✅ {code_str}" if row["is_valid"] == 1 else f"❌ {code_str}"
+                return "❌ (unrecoverable)"
+            if row["is_valid"] == 1:
+                return f"✅ {code}"
+            if row["validation_status"] == "inferred":
+                # Check digit computed, not read: shown but not confirmed.
+                return f"⚠️ {code} (unverified)"
+            return f"❌ {code}"
 
         display["recovered"] = display.apply(_format_final, axis=1)
 
-        display["edits"] = display["recovery_edits"].apply(
-            lambda x: "" if pd.isna(x) or x == 0 else f"{int(x)} edit(s)"
+        display["edits"] = display.apply(
+            # validation_status is NaN for adapters that don't report it.
+            lambda r: (r["validation_status"] if isinstance(r["validation_status"], str) else "")
+            + ("" if pd.isna(r["recovery_edits"]) or r["recovery_edits"] == 0
+               else f", {int(r['recovery_edits'])} edit(s)"),
+            axis=1,
         )
-        display = display[["plate", "gate", "raw_code", "recovered", "edits"]]
-        display.columns = ["Plate", "Gate", "Raw OCR", "Final", "Recovery"]
+        display["size_type"] = display["size_type"].fillna("")
+        display = display[["plate", "gate", "raw_code", "recovered", "edits", "size_type"]]
+        display.columns = ["Plate", "Gate", "Raw OCR", "Final", "How", "Size/type"]
         st.dataframe(display, hide_index=True, width="stretch")
 
 

@@ -59,9 +59,11 @@ containers = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("event_id", Integer, ForeignKey("events.id"), nullable=False),
-    Column("raw_code", String(16), nullable=True),       # OCR's argmax read
-    Column("recovered_code", String(16), nullable=True), # post-recovery, validated
-    Column("is_valid", Integer, nullable=False),         # 1 if validated, 0 otherwise
+    Column("raw_code", String(64), nullable=True),       # what OCR read, before fixes
+    Column("recovered_code", String(16), nullable=True), # final code (also set when inferred)
+    Column("is_valid", Integer, nullable=False),         # 1 if the check digit confirms it
+    Column("validation_status", String(16), nullable=True),  # verified|recovered|inferred|failed
+    Column("size_type", String(4), nullable=True),       # ISO size/type code, e.g. 45G1
     Column("recovery_edits", Integer, nullable=True),    # number of recovered chars
     Column("log_probability", Float, nullable=True),     # confidence proxy
     Column("recorded_at", Float, nullable=False),
@@ -259,8 +261,10 @@ def insert_container_reading(
     recovery_edits: int | None,
     log_probability: float | None,
     recorded_at: float,
+    validation_status: str | None = None,
+    size_type: str | None = None,
 ) -> int:
-    """Record an ISO 6346 OCR reading (raw + recovered)."""
+    """Record an ISO 6346 OCR reading (raw + final code + how it was established)."""
     with transaction(engine) as conn:
         result = conn.execute(
             containers.insert().values(
@@ -268,6 +272,8 @@ def insert_container_reading(
                 raw_code=raw_code,
                 recovered_code=recovered_code,
                 is_valid=1 if is_valid else 0,
+                validation_status=validation_status,
+                size_type=size_type,
                 recovery_edits=recovery_edits,
                 log_probability=log_probability,
                 recorded_at=recorded_at,
@@ -477,6 +483,8 @@ def list_recent_containers(engine: Engine, limit: int = 30) -> list[dict]:
                 containers.c.raw_code,
                 containers.c.recovered_code,
                 containers.c.is_valid,
+                containers.c.validation_status,
+                containers.c.size_type,
                 events.c.plate,
                 events.c.assigned_gate,
             )

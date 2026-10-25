@@ -40,7 +40,7 @@ Three research objectives addressed:
 DepotManagementSystemFYP/
 ├── src/
 │   ├── iso6346.py            # ISO 6346 validation and distribution-guided recovery
-│   ├── iso6346_recovery.py   # OCR-confusion substitution recovery (used by real OCR)
+│   ├── iso6346_recovery.py   # Reads codes from OCR fragments; verified/recovered/inferred status
 │   ├── db.py                 # SQLAlchemy schema and queries (SQLite, PostgreSQL-ready)
 │   ├── ocr.py                # OCRAdapter ABC, MockOCRAdapter, RealOCRAdapter
 │   ├── image_source.py       # ImageSource ABC, SyntheticImageSource, RealImageSource
@@ -83,9 +83,8 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
-All ~190 tests should pass except `test_ocr.py::TestRealOCRStub`, which is
-out of date with the current `RealOCRAdapter` signature. The suite takes
-about 20 s; the simulation and evaluation tests are the slowest.
+All ~250 tests should pass in about 25 s; the simulation and evaluation
+tests are the slowest. None of them need the OCR models.
 
 ### Run the routing algorithm evaluation
 
@@ -125,6 +124,24 @@ To regenerate the plots and report-ready tables from the CSV:
 
 ```bash
 python scripts/plot_evaluation.py
+```
+
+### Run the OCR benchmark
+
+Runs CCLN + PaddleOCR on every labelled image in `images/` (~1 hour on CPU
+with `--all-rotations`) and saves each image's OCR fragments for all four
+rotations:
+
+```bash
+python scripts/benchmark_ocr.py --all-rotations --csv-output results/ocr_capture_all_rotations.csv
+```
+
+The code-reading step can then be re-evaluated offline in seconds, without
+re-running OCR. This compares the FYP1 recovery with each configuration of
+the current reader and writes `results/recovery_ablation.md`:
+
+```bash
+python scripts/replay_recovery.py
 ```
 
 ### Run the live demo (dashboard)
@@ -215,9 +232,15 @@ router's knob is `alpha` (default 0.7). See the `src/router.py` docstrings.
 4. **Results before FYP2 were affected by a dispatcher bug** that could
    assign several trucks to one gate in a single dispatch step. FYP1's
    published numbers should not be compared directly with the current ones.
-5. **The OCR pipeline is ~80% accurate** on the current real-image set
-   without fine-tuning. PaddleOCR was used out of the box; fine-tuning on
-   the project's labeled container dataset is a recommended next step.
+5. **OCR is not yet fine-tuned.** On all 1,386 labelled images (labels
+   audited against the check digit; see `images/RELABEL_LOG.csv`) the
+   pipeline validates 74.8% of codes correctly, with 9 codes (0.6%)
+   validated but wrong — mostly PaddleOCR reading "8" as "0" in a way that
+   still passes the check digit. Another 18% are *inferred*: the boxed
+   check digit was missing or misread and was computed from the other ten
+   characters (80% of these are correct, but none are verified). PaddleOCR
+   is used out of the box; fine-tuning on the labelled crops is the next
+   step. See `results/recovery_ablation.md`.
 6. **Synthetic images are for pipeline testing only.** They do not match
    the training distribution of CCLN and would not pass through the
    localization stage reliably. The dashboard demo uses real container

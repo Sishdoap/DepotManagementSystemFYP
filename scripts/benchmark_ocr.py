@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import csv
+import json
 import re
 import sys
 import time
@@ -84,6 +85,12 @@ def main():
         default="cpu",
         help="cpu or cuda (for CCLN).",
     )
+    parser.add_argument(
+        "--all-rotations",
+        action="store_true",
+        help="Run every rotation even after a valid read, so the saved "
+             "fragments are complete for offline replay (~4x slower).",
+    )
     args = parser.parse_args()
 
     images_dir = Path(args.images_dir)
@@ -110,6 +117,7 @@ def main():
         paddle_gpu=False,
         use_localization=True,
         try_rotations=not args.no_rotations,
+        try_all_rotations=args.all_rotations,
     )
     print(f"OCR ready in {time.time() - t0:.1f}s\n")
 
@@ -120,6 +128,8 @@ def main():
     n_correct = 0          # recovered code matches ground truth exactly
     n_iso_valid = 0        # any valid ISO 6346 output (may not match truth)
     n_failed = 0           # OCR produced no valid code at all
+    n_inferred = 0         # check digit computed rather than read (unverified)
+    n_inferred_correct = 0
     total_latency = 0.0
 
     print(f"{'#':>4} {'File':<32} {'Truth':<12} {'OCR':<12} {'Result':<14}  {'Latency'}")
@@ -144,8 +154,11 @@ def main():
                 "recovered_code": "",
                 "is_valid": False,
                 "correct": False,
+                "status": "error",
+                "size_type": "",
                 "latency_ms": 0,
                 "error": str(e),
+                "fragments": "",
             })
             n_failed += 1
             continue
@@ -163,23 +176,20 @@ def main():
             is_valid = (final == truth and len(truth) == 11)
             correct = is_valid
         elif args.no_recovery:
-            # Validation only: did the raw OCR output already pass ISO 6346?
-            # If yes, accept it; otherwise, reject (no recovery attempt).
-            raw = result.raw_string or ""
-            # Strip whitespace and uppercase before validating
-            raw_clean = re.sub(r"[^A-Z0-9]", "", raw.upper())
-            from src.iso6346_recovery import is_valid_container_code
-            if is_valid_container_code(raw_clean):
-                final = raw_clean
-                is_valid = True
-            else:
-                final = ""
-                is_valid = False
+            # Validation only: accept a code only if OCR read it exactly
+            # right (status "verified"); no fixes, no inference.
+            is_valid = result.validation_status == "verified"
+            final = result.recovered_code if is_valid else ""
             correct = is_valid and final == truth
         else:
             final = result.recovered_code or ""
             is_valid = result.is_valid
             correct = is_valid and final == truth
+
+        status = result.validation_status or ""
+        if status == "inferred" and not (args.no_validation or args.no_recovery):
+            n_inferred += 1
+            n_inferred_correct += final == truth
 
         if correct:
             n_correct += 1
@@ -192,6 +202,8 @@ def main():
             verdict = "✓ correct"
         elif is_valid:
             verdict = "~ valid≠truth"
+        elif status == "inferred":
+            verdict = "? inferred" + (" ✓" if final == truth else " ✗")
         else:
             verdict = "✗ failed"
 
@@ -207,8 +219,12 @@ def main():
             "recovered_code": final,
             "is_valid": is_valid,
             "correct": correct,
+            "status": status,
+            "size_type": result.size_type or "",
             "latency_ms": result.latency_ms,
             "error": "",
+            # JSON {rotation: [[text, confidence], ...]} for offline replay.
+            "fragments": json.dumps(result.fragments_by_rotation or {}),
         })
 
     # Summary.
@@ -239,6 +255,10 @@ def main():
               f"{valid_but_wrong/n_labeled:.1%}")
         print(f"OCR failed (no valid code produced):             "
               f"{n_failed}/{n_labeled} = {n_failed/n_labeled:.1%}")
+        if n_inferred:
+            print(f"  of which inferred (check digit computed, UNVERIFIED): "
+                  f"{n_inferred}, correct {n_inferred_correct} "
+                  f"({n_inferred_correct / n_inferred:.0%})")
         print()
         print(f"Mean OCR latency:           {total_latency/n_labeled:.0f}ms per image")
 

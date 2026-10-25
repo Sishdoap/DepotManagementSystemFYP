@@ -223,6 +223,22 @@ def update_event_assignment(
         )
 
 
+def set_waiting_note(engine: Engine, event_id: int, note: str) -> None:
+    """Record why a waiting truck is being held (shown on the dashboard).
+
+    Stored in `routing_reason` while the truck is still waiting; replaced by
+    the actual routing decision when it is assigned to a gate. Has no
+    effect once the truck has left the queue.
+    """
+    with transaction(engine) as conn:
+        conn.execute(
+            events.update()
+            .where(events.c.id == event_id)
+            .where(events.c.status == "waiting")
+            .values(routing_reason=note)
+        )
+
+
 def complete_event(engine: Engine, event_id: int, departed_at: float) -> None:
     """Mark an event as completed."""
     with transaction(engine) as conn:
@@ -353,6 +369,64 @@ def recent_throughput(
         ).scalar()
     trucks = float(result or 0)
     return trucks / (window_seconds / 60.0)
+
+
+def recent_arrival_rate(
+    engine: Engine,
+    *,
+    now: float,
+    window_seconds: int = 600,
+) -> float:
+    """Trucks arriving per minute over the last `window_seconds`.
+
+    Early in a run (now < window_seconds) the rate is taken over the time
+    elapsed so far, so it isn't underestimated just because the window
+    reaches back before the start.
+    """
+    span = min(float(window_seconds), now)
+    if span <= 0:
+        return 0.0
+    with transaction(engine) as conn:
+        n = conn.execute(
+            select(func.count())
+            .select_from(events)
+            .where(events.c.arrived_at > now - span)
+            .where(events.c.arrived_at <= now)
+        ).scalar()
+    return float(n or 0) / (span / 60.0)
+
+
+def mean_service_time(
+    engine: Engine,
+    gate_id: str,
+    *,
+    now: float,
+    window_seconds: int = 600,
+) -> float | None:
+    """Observed mean service time (seconds) for `gate_id`.
+
+    Uses completions in the last `window_seconds` if there are any, so the
+    estimate tracks a gate whose speed drifts. Falls back to the gate's
+    all-time mean when the window is empty (a routing policy may leave a
+    slow gate idle for a while — that shouldn't erase what we know about
+    it). Returns None only if the gate has never completed a truck.
+    """
+    trucks = func.sum(gate_throughput.c.trucks_served)
+    weighted = func.sum(gate_throughput.c.trucks_served * gate_throughput.c.mean_service_time)
+    base = (
+        select(trucks, weighted)
+        .where(gate_throughput.c.gate_id == gate_id)
+        .where(gate_throughput.c.window_start <= now)
+    )
+    with transaction(engine) as conn:
+        n, total = conn.execute(
+            base.where(gate_throughput.c.window_start >= now - window_seconds)
+        ).one()
+        if not n:
+            n, total = conn.execute(base).one()
+    if not n:
+        return None
+    return float(total) / float(n)
 
 def update_sim_clock(engine: Engine, sim_now: float) -> None:
     """Update the simulator's current time so the dashboard can compute waits."""

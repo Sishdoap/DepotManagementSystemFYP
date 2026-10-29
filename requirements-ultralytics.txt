@@ -1,0 +1,14 @@
+# YOLO detection for the footage scripts (scripts/scan_trucks.py).
+#
+# Install WITHOUT dependencies:
+#     pip install --no-deps -r requirements-ultralytics.txt
+#
+# ultralytics depends on opencv-python, which would be installed next to the
+# opencv-contrib-python already in requirements.txt. Both provide the `cv2`
+# module and overwrite each other's files. Everything else it needs (torch,
+# numpy, pyyaml, ...) is already in requirements.txt; nvidia-ml-py and
+# ultralytics-platform are optional and not needed here.
+ultralytics==8.4.192
+ultralytics-thop==2.2.3
+polars==2.1.0
+polars-runtime-32==2.1.0

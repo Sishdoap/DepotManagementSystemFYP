@@ -1,0 +1,18 @@
+# Optional: run PaddleOCR on an NVIDIA GPU (measured ~95x faster than CPU
+# on footage crops with an RTX 5070 Ti: 0.5 s vs 48 s per crop, 4 rotations).
+#
+# requirements.txt installs the CPU build `paddlepaddle`. To switch, remove it
+# first — both builds provide the same `paddle` module:
+#
+#     pip uninstall -y paddlepaddle
+#     pip install -r requirements-gpu.txt \
+#         --index-url https://www.paddlepaddle.org.cn/packages/stable/cu130/ \
+#         --extra-index-url https://pypi.org/simple
+#
+# cu130 matches the CUDA 13 build of torch in requirements.txt, so both share
+# the same NVIDIA libraries (RTX 50-series GPUs need CUDA >= 12.9 builds).
+# pip check then reports torch wanting nvidia-nccl-cu13 2.29.7: NCCL is only
+# used for multi-GPU training, which this project doesn't do.
+#
+# Verify:  python -c "import paddle; paddle.utils.run_check()"
+paddlepaddle-gpu==3.4.0

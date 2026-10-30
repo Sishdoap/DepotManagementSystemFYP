@@ -1,0 +1,50 @@
+# Camera setup for the event extractor (scripts/track_trucks.py,
+# scripts/extract_events.py). Loaded by src.footage.load_camera_configs.
+#
+# Camera ids are the RTSP ports in the VLC recording filenames. Frames are
+# 5120x1440; all coordinates are full-frame pixels (thumbnails saved by the
+# scripts are 1/3 scale, so multiply what you read off them by 3).
+#
+# role:            cab | codes | backup | ignore  (see CameraConfig)
+# lane:            polygon around the ENTRY lane; tracks whose box centres
+#                  fall mostly outside it are dropped
+# min_box_px:      a track needs at least one box with a side this long
+# min_detections:  a track needs this many sampled frames (default 3)
+# clock_offset_s:  added to the filename start time to match the burned-in
+#                  clock: a number, or [[from video second, offset], ...]
+#
+# Clock offsets, measured by scripts/measure_clock_offsets.py (2026-10-30):
+# flat to within ~0.05 s on every camera except one jump at ~2090 s of
+# video (~09:50:40 wall clock), when all three streams lost 1.2-1.8 s of
+# frames together. No truck passes within a minute of the jump.
+
+cameras:
+  561:
+    # Barrier / weighbridge, cabs head-on. A camera bracket covers the
+    # bottom-right corner, where it causes false detections.
+    role: cab
+    lane: [[1350, 1440], [3450, 1440], [3000, 0], [1800, 0]]
+    min_box_px: 500
+    clock_offset_s: [[0, 3.16], [2090, 4.38]]
+  558:
+    # Overhead down the entry lane; trucks drive away from the camera, so
+    # it sees the cab roof first, then the container doors. The lane on
+    # the right carries outbound trucks facing the camera; they enter the
+    # frame top-right (x ~3050-3150 at y < 200), hence the narrow top edge.
+    role: codes
+    lane: [[1680, 1440], [3450, 1440], [2950, 0], [2100, 0]]
+    min_box_px: 500
+    clock_offset_s: [[0, 6.59], [2090, 8.43]]
+  559:
+    # Same lane further on. Trucks in the outbound lane on the right
+    # sometimes stand still for over a minute. Entry trucks are seen only
+    # briefly and close up (1-4 sampled frames, boxes > 1300 px).
+    role: backup
+    lane: [[1440, 1440], [3600, 1440], [3450, 0], [1950, 0]]
+    min_box_px: 1200
+    min_detections: 1
+    clock_offset_s: [[0, 3.34], [2090, 4.81]]
+  557:
+    role: ignore      # wide yard panorama, mostly straddle carriers
+  560:
+    role: ignore      # near-duplicate of 557

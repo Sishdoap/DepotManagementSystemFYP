@@ -12,7 +12,8 @@ if str(root_dir) not in sys.path:
 
 import pytest
 
-from src.events import CameraPass, assemble_events
+from src.events import CameraPass, assemble_events, camera_chain, extract_events
+from src.footage import CameraConfig, Detection, RecordingInfo
 
 T0 = datetime(2026, 8, 12, 9, 0, 0)
 CHAIN = ["561", "558", "559"]
@@ -102,3 +103,39 @@ class TestAssembly:
 
     def test_no_passes(self):
         assert assemble_events([], CHAIN) == []
+
+
+LANE = ((0, 0), (1000, 0), (1000, 1000), (0, 1000))
+
+
+def tracked(t, track_id, at=(100, 100), side=400):
+    x, y = at
+    return Detection(t, int(t * 20), "truck", 0.9, (x, y, x + side, y + side), track_id)
+
+
+class TestExtractEvents:
+    configs = {
+        "558": CameraConfig("558", "codes", LANE, min_box_px=300, clock_offsets=((0, 5.0),)),
+        "561": CameraConfig("561", "cab", LANE, min_box_px=300),
+        "557": CameraConfig("557", "ignore"),
+    }
+    recordings = {c: RecordingInfo(c, T0) for c in ("558", "561", "557")}
+
+    def test_chain_follows_roles(self):
+        assert camera_chain(self.configs) == ["561", "558"]
+
+    def test_filters_offsets_and_assembles(self):
+        tracks = {
+            "561": [tracked(t, 1) for t in (10, 10.5, 11)],
+            # 558 video time 8 s + 5 s clock offset = 13 s wall: 3 s after the cab.
+            "558": [tracked(t, 4) for t in (8, 8.5, 9)]
+                   + [tracked(t, 5, at=(5000, 100)) for t in (8, 8.5, 9)],   # outbound lane
+        }
+        ex = extract_events(tracks, self.configs, self.recordings)
+        assert len(ex.events) == 1
+        e = ex.events[0]
+        assert e.cameras == ["561", "558"]
+        assert e.on("558")[0].start == T0 + timedelta(seconds=13)
+        assert set(ex.detections) == {("561", 1), ("558", 4)}
+        assert [(r["camera"], r["track_id"]) for r in ex.rejected] == [("558", 5)]
+        assert "outside entry lane" in ex.rejected[0]["reason"]

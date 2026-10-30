@@ -14,7 +14,8 @@ import pytest
 
 from src.footage import (
     CameraConfig, Detection, group_by_track, group_into_passes, keep_entry_lane_passes,
-    load_camera_configs, parse_overlay_time, parse_recording_name, point_in_polygon, wall_clock,
+    load_camera_configs, load_tracks_csv, parse_overlay_time, parse_recording_name,
+    pass_rejections, point_in_polygon, wall_clock,
 )
 
 NAME = "vlc-record-2026-08-12-09h15m42s-rtsp___175.138.143.18_558_Streaming_Channels_101-.mp4"
@@ -165,3 +166,28 @@ class TestLaneFilter:
         passes = group_by_track(dets)
         assert len(keep_entry_lane_passes(passes, cfg, min_lane_fraction=0.5)) == 1
         assert keep_entry_lane_passes(passes, cfg, min_lane_fraction=0.75) == []
+
+    def test_rejections_list_every_failed_check(self):
+        cfg = CameraConfig("559", "backup", SQUARE, min_box_px=300, min_detections=3)
+        p = group_by_track([det(0, 100, track_id=1, at=(2000, 100))])[0]
+        reasons = pass_rejections(p, cfg)
+        assert len(reasons) == 3
+        assert reasons[0].startswith("only 1 frames") and reasons[1].startswith("small")
+        assert reasons[2].startswith("outside entry lane")
+
+    def test_kept_pass_has_no_rejections(self):
+        cfg = CameraConfig("558", "codes", SQUARE, min_box_px=300)
+        p = group_by_track([det(t, 400, track_id=1, at=(100, 100)) for t in (0, 0.5, 1)])[0]
+        assert pass_rejections(p, cfg) == []
+
+
+class TestTracksCsv:
+    def test_round_trip(self, tmp_path):
+        path = tmp_path / "tracks.csv"
+        path.write_text("camera,track_id,t,frame,label,conf,x1,y1,x2,y2\n"
+                        "558,7,1.25,25,truck,0.8,10,20,110,220\n"
+                        "561,3,0.5,10,bus,0.4,0,0,5,5\n")
+        tracks = load_tracks_csv(path)
+        d = tracks["558"][0]
+        assert (d.track_id, d.t, d.frame, d.label, d.box) == (7, 1.25, 25, "truck", (10, 20, 110, 220))
+        assert set(tracks) == {"558", "561"}

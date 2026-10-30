@@ -36,7 +36,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional
+
+from .footage import (
+    CAMERA_ROLES, CameraConfig, Detection, RecordingInfo, group_by_track, pass_rejections,
+    wall_clock,
+)
 
 
 @dataclass(frozen=True)
@@ -143,3 +148,51 @@ def assemble_events(
             target.passes.append(p)
 
     return sorted(events, key=lambda e: e.start)
+
+
+def camera_chain(configs: Mapping[str, CameraConfig]) -> list[str]:
+    """Cameras in the order a truck reaches them: roles cab -> codes -> backup."""
+    return sorted((c for c, cfg in configs.items() if cfg.role != "ignore"),
+                  key=lambda c: CAMERA_ROLES.index(configs[c].role))
+
+
+@dataclass
+class ExtractedEvents:
+    """Everything scripts need from one extraction run."""
+    chain: list[str]
+    events: list[Event]
+    detections: dict[tuple[str, int], list[Detection]]   # (camera, track id) -> kept detections
+    rejected: list[dict]                                   # one row per dropped track
+
+
+def extract_events(
+    tracks: Mapping[str, list[Detection]],
+    configs: Mapping[str, CameraConfig],
+    recordings: Mapping[str, RecordingInfo],
+    **assembly_kwargs,
+) -> ExtractedEvents:
+    """Tracked detections -> lane-filtered, clock-corrected passes -> events.
+
+    Shared by scripts/extract_events.py and the scripts that read the
+    events (M2 onward), so event numbering is identical everywhere: events
+    are numbered 1.. in entry-time order, and the same tracks + config give
+    the same events.
+    """
+    chain = camera_chain(configs)
+    passes, detections, rejected = [], {}, []
+    for cam in chain:
+        cfg, info = configs[cam], recordings[cam]
+        for p in group_by_track(tracks.get(cam, [])):
+            tid = p.detections[0].track_id
+            start = wall_clock(info, p.start, cfg.offset_at(p.start))
+            end = wall_clock(info, p.end, cfg.offset_at(p.end))
+            reasons = pass_rejections(p, cfg)
+            if reasons:
+                rejected.append({"camera": cam, "track_id": tid, "start": f"{start:%H:%M:%S}",
+                                 "end": f"{end:%H:%M:%S}", "frames": len(p.detections),
+                                 "reason": "; ".join(reasons)})
+            else:
+                passes.append(CameraPass(cam, tid, start, end))
+                detections[(cam, tid)] = p.detections
+    events = assemble_events(passes, chain, **assembly_kwargs)
+    return ExtractedEvents(chain, events, detections, rejected)

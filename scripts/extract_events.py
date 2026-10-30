@@ -37,40 +37,11 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.events import CameraPass, assemble_events
-from src.footage import (
-    CAMERA_ROLES, Detection, group_by_track, keep_entry_lane_passes, load_camera_configs,
-    parse_recording_name, wall_clock,
-)
+from src.events import extract_events
+from src.footage import Detection, load_camera_configs, load_tracks_csv, parse_recording_name
 
 SHEET_FRAMES_PER_CAMERA = 4
 SHEET_TILE_HEIGHT = 360
-
-
-def load_tracks(path) -> dict[str, list[Detection]]:
-    by_camera: dict[str, list[Detection]] = defaultdict(list)
-    with open(path) as f:
-        for r in csv.DictReader(f):
-            by_camera[r["camera"]].append(Detection(
-                t=float(r["t"]), frame=int(r["frame"]), label=r["label"], conf=float(r["conf"]),
-                box=tuple(float(r[k]) for k in ("x1", "y1", "x2", "y2")),
-                track_id=int(r["track_id"]),
-            ))
-    return by_camera
-
-
-def reject_reason(p, cfg) -> str:
-    """Every check of keep_entry_lane_passes that this pass fails, joined by '; '."""
-    reasons = []
-    if len(p.detections) < cfg.min_detections:
-        reasons.append(f"only {len(p.detections)} frames (< {cfg.min_detections})")
-    biggest = max(d.longest_side for d in p.detections)
-    if biggest < cfg.min_box_px:
-        reasons.append(f"small: largest box side {biggest:.0f} px (< {cfg.min_box_px:.0f})")
-    in_lane = sum(cfg.in_lane(d) for d in p.detections) / len(p.detections)
-    if in_lane < 0.5:
-        reasons.append(f"outside entry lane ({in_lane:.0%} of box centres inside)")
-    return "; ".join(reasons)
 
 
 def sample_detections(dets: list[Detection], n: int) -> list[Detection]:
@@ -165,34 +136,19 @@ def main():
     args = parser.parse_args()
 
     configs = load_camera_configs(args.config)
-    chain = sorted((c for c, cfg in configs.items() if cfg.role != "ignore"),
-                   key=lambda c: CAMERA_ROLES.index(configs[c].role))
     videos = {info.camera: p for p in Path(args.videos_dir).glob("*.mp4")
               if (info := parse_recording_name(p.name))}
     infos = {cam: parse_recording_name(p.name) for cam, p in videos.items()}
-    tracks = load_tracks(args.tracks)
     out_dir = Path(args.out_dir)
 
-    camera_passes, rejected, track_dets = [], [], {}
+    ex = extract_events(load_tracks_csv(args.tracks), configs, infos,
+                        max_lag_s=args.max_lag, merge_gap_s=args.merge_gap)
+    chain, events, track_dets, rejected = ex.chain, ex.events, ex.detections, ex.rejected
     for cam in chain:
-        cfg, info = configs[cam], infos[cam]
-        all_passes = group_by_track(tracks.get(cam, []))
-        kept = keep_entry_lane_passes(all_passes, cfg)
-        for p in all_passes:
-            tid = p.detections[0].track_id
-            start = wall_clock(info, p.start, cfg.offset_at(p.start))
-            end = wall_clock(info, p.end, cfg.offset_at(p.end))
-            if p in kept:
-                camera_passes.append(CameraPass(cam, tid, start, end))
-                track_dets[(cam, tid)] = p.detections
-            else:
-                rejected.append({"camera": cam, "track_id": tid, "start": f"{start:%H:%M:%S}",
-                                 "end": f"{end:%H:%M:%S}", "frames": len(p.detections),
-                                 "reason": reject_reason(p, cfg)})
-        print(f"camera {cam} ({cfg.role}): {len(all_passes)} tracks, {len(kept)} kept")
+        n_kept = sum(1 for c, _ in track_dets if c == cam)
+        n_rej = sum(1 for r in rejected if r["camera"] == cam)
+        print(f"camera {cam} ({configs[cam].role}): {n_kept + n_rej} tracks, {n_kept} kept")
 
-    events = assemble_events(camera_passes, chain, max_lag_s=args.max_lag,
-                             merge_gap_s=args.merge_gap)
     sheets = ([] if args.no_sheets else
               write_contact_sheets(events, track_dets, videos, chain, out_dir / "sheets"))
 

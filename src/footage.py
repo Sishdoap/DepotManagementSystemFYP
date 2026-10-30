@@ -125,31 +125,57 @@ def group_by_track(detections: Iterable[Detection]) -> list[TruckPass]:
     return sorted(by_id.values(), key=lambda p: p.start)
 
 
+def pass_rejections(
+    p: TruckPass,
+    config: "CameraConfig",
+    *,
+    min_lane_fraction: float = 0.5,
+) -> list[str]:
+    """Every reason this pass is not a truck in the camera's entry lane; [] if it is.
+
+    A pass is kept when it has `config.min_detections` sampled frames
+    (flickers fail this), its largest box reaches `config.min_box_px` (far-
+    away vehicles fail this), and at least `min_lane_fraction` of its box
+    centres are inside the lane polygon (parked trucks, the outbound lane
+    and yard traffic fail this).
+    """
+    reasons = []
+    n = len(p.detections)
+    if n < config.min_detections:
+        reasons.append(f"only {n} frames (< {config.min_detections})")
+    biggest = max(d.longest_side for d in p.detections)
+    if biggest < config.min_box_px:
+        reasons.append(f"small: largest box side {biggest:.0f} px (< {config.min_box_px:.0f})")
+    in_lane = sum(config.in_lane(d) for d in p.detections) / n
+    if in_lane < min_lane_fraction:
+        reasons.append(f"outside entry lane ({in_lane:.0%} of box centres inside)")
+    return reasons
+
+
 def keep_entry_lane_passes(
     passes: Iterable[TruckPass],
     config: "CameraConfig",
     *,
     min_lane_fraction: float = 0.5,
 ) -> list[TruckPass]:
-    """Drop passes that are not trucks in this camera's entry lane.
+    """Drop passes that are not trucks in this camera's entry lane (see pass_rejections)."""
+    return [p for p in passes
+            if not pass_rejections(p, config, min_lane_fraction=min_lane_fraction)]
 
-    A pass is kept when at least `min_lane_fraction` of its box centres
-    are inside the lane polygon (parked trucks, the outbound lane and yard
-    traffic fail this), its largest box reaches `config.min_box_px` (far-
-    away vehicles fail this), and it has `config.min_detections` sampled
-    frames (flickers fail this).
-    """
-    kept = []
-    for p in passes:
-        if len(p.detections) < config.min_detections:
-            continue
-        if max(d.longest_side for d in p.detections) < config.min_box_px:
-            continue
-        in_lane = sum(config.in_lane(d) for d in p.detections)
-        if in_lane < min_lane_fraction * len(p.detections):
-            continue
-        kept.append(p)
-    return kept
+
+def load_tracks_csv(path) -> dict[str, list[Detection]]:
+    """Read scripts/track_trucks.py output into {camera id: [Detection, ...]}."""
+    import csv
+
+    by_camera: dict[str, list[Detection]] = {}
+    with open(path) as f:
+        for r in csv.DictReader(f):
+            by_camera.setdefault(r["camera"], []).append(Detection(
+                t=float(r["t"]), frame=int(r["frame"]), label=r["label"], conf=float(r["conf"]),
+                box=tuple(float(r[k]) for k in ("x1", "y1", "x2", "y2")),
+                track_id=int(r["track_id"]),
+            ))
+    return by_camera
 
 
 def wall_clock(info: RecordingInfo, seconds: float, offset_seconds: float = 0.0) -> datetime:

@@ -21,7 +21,8 @@ scanned. One worker process per video: decoding runs on the CPU and is the
 bottleneck, detection runs on the GPU.
 
 Output (results/ is gitignored):
-    results/events/tracks.csv   one row per tracked detection
+    results/events/tracks.csv   one row per tracked detection; rows of
+                                cameras not scanned in this run are kept
 
 Usage:
     python scripts/track_trucks.py
@@ -125,10 +126,21 @@ def main():
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    # Keep rows of cameras not scanned this time, so cameras can be added one by one.
+    scanned = {camera for camera, _, _ in results}
+    kept_rows = []
+    if out.exists():
+        with out.open() as f:
+            kept_rows = [r for r in csv.reader(f)][1:]
+        kept_rows = [r for r in kept_rows if r and r[0] not in scanned]
+        if kept_rows:
+            print(f"Keeping {len(kept_rows)} existing rows for cameras "
+                  f"{', '.join(sorted({r[0] for r in kept_rows}))}")
     with out.open("w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["camera", "track_id", "t", "frame", "label", "conf",
                          "x1", "y1", "x2", "y2"])
+        writer.writerows(kept_rows)
         for camera, detections, elapsed in sorted(results):
             print(f"camera {camera}: {len(detections)} tracked detections, "
                   f"{len({d.track_id for d in detections})} tracks ({elapsed / 60:.1f} min)")

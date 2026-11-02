@@ -149,6 +149,20 @@ def pass_rejections(
     in_lane = sum(config.in_lane(d) for d in p.detections) / n
     if in_lane < min_lane_fraction:
         reasons.append(f"outside entry lane ({in_lane:.0%} of box centres inside)")
+    if config.min_bottom_px is not None:
+        lowest = max(d.box[3] for d in p.detections)
+        if lowest < config.min_bottom_px:
+            reasons.append(f"far: lowest box edge {lowest:.0f} px (< {config.min_bottom_px:.0f})")
+    (x0, y0), (x1, y1) = p.detections[0].center, p.detections[-1].center
+    if config.direction is not None:
+        axis, sign = DIRECTIONS[config.direction]
+        progress = sign * ((x1 - x0, y1 - y0)[axis])
+        if progress < -config.max_wrong_way_px:
+            reasons.append(f"moves the wrong way ({-progress:.0f} px against {config.direction})")
+    if config.stationary_s is not None:
+        moved = ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5
+        if p.end - p.start >= config.stationary_s and moved < config.stationary_px:
+            reasons.append(f"stationary ({p.end - p.start:.0f} s, moved {moved:.0f} px)")
     return reasons
 
 
@@ -206,16 +220,19 @@ def parse_overlay_time(text: str) -> Optional[time]:
 
 # --- Camera configuration -------------------------------------------------
 
-CAMERA_ROLES = ("cab", "codes", "backup", "ignore")
+# In the order a truck meets them; src.events.camera_chain sorts by this.
+CAMERA_ROLES = ("cab", "side", "codes", "backup", "ignore")
 
 
 @dataclass(frozen=True)
 class CameraConfig:
     """How one camera is used by the event extractor (config/cameras.yaml).
 
-    role           "cab" (cab front: make, plate, fleet number), "codes"
-                   (container doors/roof: ISO 6346 code, size/type),
-                   "backup" (second view of the codes), or "ignore".
+    role           "cab" (cab front: make, plate, fleet number), "side"
+                   (close side view: side code, size/type, vehicle type,
+                   rear plate as the truck leaves), "codes" (container
+                   doors/roof: ISO 6346 code, size/type), "backup" (second
+                   view of the codes), or "ignore".
     lane           polygon (full-frame pixels) around the entry lane. A
                    track counts only if most of its box centres fall inside,
                    which drops parked vehicles, the outbound lane and yard
@@ -225,6 +242,31 @@ class CameraConfig:
     min_detections a track needs this many sampled frames. 559 sees trucks
                    only briefly and close up, so it needs a lower value
                    (with a higher min_box_px) than the other cameras.
+    direction      how entry trucks move across the image: "+x", "-x",
+                   "+y" or "-y" (None = no check). A track whose box centre
+                   moves more than `max_wrong_way_px` the other way is an
+                   outbound truck. Needed on the side cameras, where the
+                   outbound lane is as close as the entry lane.
+    min_bottom_px  a track must have at least one box whose bottom edge
+                   reaches this y (None = no check). On a side view the
+                   bottom edge is where the wheels meet the ground, so it
+                   says how far away the vehicle is: entry trucks in the
+                   near lane reach >= 1364 px on 557/560, trucks in the
+                   background beyond the barrier never pass ~1050 px.
+    stationary_s / stationary_px
+                   a track lasting at least `stationary_s` seconds whose
+                   centre moves less than `stationary_px` is a parked
+                   vehicle (None = no check).
+    anchor         "start" or "end": which end of a pass is compared with
+                   the head camera when events are assembled. Side cameras
+                   see a truck while it waits at the edge of the frame,
+                   sometimes a minute before it reaches the barrier, so
+                   their passes are matched by when they end.
+    merge_gap_s    per-camera override of the assembly merge gap (None =
+                   the default); see src.events.assemble_events.
+    opens_events   False if an unmatched pass on this camera must be
+                   dropped rather than open an event of its own (side
+                   cameras).
     clock_offsets  seconds added to the filename start time so that video
                    time matches the clock burned into the frame, as a step
                    function: ((from video second, offset), ...), sorted.
@@ -237,6 +279,14 @@ class CameraConfig:
     lane: tuple[tuple[float, float], ...] = ()
     min_box_px: float = 0.0
     min_detections: int = 3
+    direction: Optional[str] = None
+    max_wrong_way_px: float = 400.0
+    min_bottom_px: Optional[float] = None
+    stationary_s: Optional[float] = None
+    stationary_px: float = 300.0
+    anchor: str = "start"
+    merge_gap_s: Optional[float] = None
+    opens_events: bool = True
     clock_offsets: tuple[tuple[float, float], ...] = ((0.0, 0.0),)
 
     def offset_at(self, seconds: float) -> float:
@@ -267,13 +317,34 @@ def load_camera_configs(path) -> dict[str, CameraConfig]:
         lane = tuple((float(x), float(y)) for x, y in spec.get("lane") or ())
         if role != "ignore" and len(lane) < 3:
             raise ValueError(f"camera {camera}: lane polygon needs at least 3 points")
+        direction = spec.get("direction")
+        if direction is not None and direction not in DIRECTIONS:
+            raise ValueError(f"camera {camera}: direction must be one of {sorted(DIRECTIONS)}")
+        anchor = spec.get("anchor", "start")
+        if anchor not in ("start", "end"):
+            raise ValueError(f"camera {camera}: anchor must be 'start' or 'end'")
         configs[camera] = CameraConfig(
             camera=camera, role=role, lane=lane,
             min_box_px=float(spec.get("min_box_px", 0)),
             min_detections=int(spec.get("min_detections", 3)),
+            direction=direction,
+            max_wrong_way_px=float(spec.get("max_wrong_way_px", 400)),
+            min_bottom_px=(float(spec["min_bottom_px"]) if spec.get("min_bottom_px") is not None
+                           else None),
+            stationary_s=(float(spec["stationary_s"]) if spec.get("stationary_s") is not None
+                          else None),
+            stationary_px=float(spec.get("stationary_px", 300)),
+            anchor=anchor,
+            merge_gap_s=(float(spec["merge_gap_s"]) if spec.get("merge_gap_s") is not None
+                         else None),
+            opens_events=bool(spec.get("opens_events", True)),
             clock_offsets=_parse_clock_offsets(spec.get("clock_offset_s", 0)),
         )
     return configs
+
+
+# direction -> (axis index into a centre (x, y), sign of entry movement)
+DIRECTIONS = {"+x": (0, 1), "-x": (0, -1), "+y": (1, 1), "-y": (1, -1)}
 
 
 def _parse_clock_offsets(value) -> tuple[tuple[float, float], ...]:

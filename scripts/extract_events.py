@@ -110,7 +110,8 @@ def write_contact_sheets(events, track_dets, videos, chain, out_dir: Path) -> li
             continue
         width = max(s.shape[1] for s in strips)
         header = np.zeros((40, width, 3), np.uint8)
-        cv2.putText(header, f"event {i:03d}  {e.start:%H:%M:%S}-{e.end:%H:%M:%S}  "
+        cv2.putText(header, f"event {i:03d}  entry {e.entry_time:%H:%M:%S}  "
+                    f"seen {e.first_seen:%H:%M:%S}-{e.end:%H:%M:%S}  "
                     f"cameras {'+'.join(e.cameras)}{'' if e.head_seen else '  (head camera missed)'}",
                     (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
         sheet = np.vstack([header] + [np.pad(s, ((0, 0), (0, width - s.shape[1]), (0, 0)))
@@ -154,9 +155,9 @@ def main():
 
     rows = []
     for i, e in enumerate(events, 1):
-        row = {"event": i, "entry_time": f"{e.start:%Y-%m-%d %H:%M:%S}",
-               "end_time": f"{e.end:%H:%M:%S}",
-               "duration_s": round((e.end - e.start).total_seconds(), 1),
+        row = {"event": i, "entry_time": f"{e.entry_time:%Y-%m-%d %H:%M:%S}",
+               "first_seen": f"{e.first_seen:%H:%M:%S}", "end_time": f"{e.end:%H:%M:%S}",
+               "duration_s": round((e.end - e.first_seen).total_seconds(), 1),
                "cameras": "+".join(e.cameras), "head_seen": e.head_seen}
         for cam in chain:
             on = e.on(cam)
@@ -181,7 +182,8 @@ def main():
     print(f"{len(events)} events ({missed} not seen by head camera {chain[0]}); "
           f"{len(rejected)} tracks rejected")
     for r in rows:
-        print(f"  {r['event']:3d}  {r['entry_time'][11:]}  {r['duration_s']:5.1f} s  {r['cameras']}")
+        print(f"  {r['event']:3d}  entry {r['entry_time'][11:]}  seen {r['first_seen']}  "
+              f"{r['duration_s']:5.1f} s  {r['cameras']}")
     print(f"Wrote {out_dir / 'events.csv'}" + (f" and {len(sheets)} contact sheets" if sheets else ""))
 
 

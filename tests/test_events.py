@@ -19,11 +19,11 @@ T0 = datetime(2026, 8, 12, 9, 0, 0)
 CHAIN = ["561", "558", "559"]
 
 
-def cp(camera, start, end=None, track_id=None):
+def cp(camera, start, end=None, track_id=None, anchor_end=False):
     """A pass from `start` to `end` seconds after T0 (end defaults to start + 2)."""
     end = start + 2 if end is None else end
     return CameraPass(camera, track_id if track_id is not None else int(start),
-                      T0 + timedelta(seconds=start), T0 + timedelta(seconds=end))
+                      T0 + timedelta(seconds=start), T0 + timedelta(seconds=end), anchor_end)
 
 
 def shape(events):
@@ -38,11 +38,12 @@ class TestAssembly:
         assert events[0].cameras == ["561", "559", "558"]      # first-seen order
         assert events[0].head_seen
 
-    def test_entry_time_is_first_sighting(self):
+    def test_entry_time_is_head_pass_first_seen_is_earliest(self):
         # A later camera may see the truck slightly before the head (clock tolerance).
         events = assemble_events([cp("561", 10), cp("558", 9)], CHAIN)
         assert len(events) == 1
-        assert events[0].start == T0 + timedelta(seconds=9)
+        assert events[0].entry_time == T0 + timedelta(seconds=10)
+        assert events[0].first_seen == T0 + timedelta(seconds=9)
 
     def test_back_to_back_trucks_stay_apart(self):
         # Two trucks 31 s apart (the closest pair in the footage).
@@ -105,6 +106,44 @@ class TestAssembly:
         assert assemble_events([], CHAIN) == []
 
 
+SIDE_CHAIN = ["561", "560", "558"]
+
+
+class TestSideCameras:
+    def test_waiting_truck_matched_by_pass_end(self):
+        # 560 sees the truck waiting from t=0; it reaches the barrier (561) at
+        # t=60 and leaves 560's view at t=65. Matched by its start, the pass
+        # would open its own event; matched by its end, it joins the truck.
+        passes = [cp("560", 0, 65, anchor_end=True), cp("561", 60)]
+        events = assemble_events(passes, SIDE_CHAIN)
+        assert len(events) == 1
+        assert events[0].entry_time == T0 + timedelta(seconds=60)    # checkpoint time
+        assert events[0].first_seen == T0                             # includes waiting
+
+    def test_non_opener_unmatched_pass_is_dropped(self):
+        dropped = []
+        events = assemble_events([cp("561", 100), cp("560", 0, 5, anchor_end=True)], SIDE_CHAIN,
+                                 openers={"561", "558"}, dropped=dropped)
+        assert len(events) == 1 and events[0].cameras == ["561"]
+        assert [p.camera for p in dropped] == ["560"]
+
+    def test_openers_none_means_everyone_opens(self):
+        events = assemble_events([cp("560", 0, 5, anchor_end=True)], SIDE_CHAIN)
+        assert len(events) == 1 and events[0].head_seen is False
+
+    def test_per_camera_merge_gap(self):
+        # Cab fragment, then 30 s with the container side filling the frame
+        # (no detection), then the rear fragment.
+        passes = [cp("561", 0), cp("560", 0, 5, anchor_end=True),
+                  cp("560", 35, 40, anchor_end=True)]
+        short = assemble_events(passes, SIDE_CHAIN, merge_gap_s=25,
+                                openers={"561"}, dropped=[])
+        longer = assemble_events(passes, SIDE_CHAIN, merge_gap_s=25,
+                                 merge_gap_by_camera={"560": 40}, openers={"561"})
+        assert len(short[0].on("560")) == 1
+        assert len(longer[0].on("560")) == 2
+
+
 LANE = ((0, 0), (1000, 0), (1000, 1000), (0, 1000))
 
 
@@ -123,6 +162,13 @@ class TestExtractEvents:
 
     def test_chain_follows_roles(self):
         assert camera_chain(self.configs) == ["561", "558"]
+
+    def test_side_cameras_follow_the_head(self):
+        configs = {"559": CameraConfig("559", "backup", LANE),
+                   "560": CameraConfig("560", "side", LANE),
+                   "558": CameraConfig("558", "codes", LANE),
+                   "561": CameraConfig("561", "cab", LANE)}
+        assert camera_chain(configs) == ["561", "560", "558", "559"]
 
     def test_filters_offsets_and_assembles(self):
         tracks = {

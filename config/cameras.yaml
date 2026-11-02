@@ -5,7 +5,7 @@
 # 5120x1440; all coordinates are full-frame pixels (thumbnails saved by the
 # scripts are 1/3 scale, so multiply what you read off them by 3).
 #
-# role:            cab | codes | backup | ignore  (see CameraConfig)
+# role:            cab | side | codes | backup | ignore  (see CameraConfig)
 # lane:            polygon around the ENTRY lane; tracks whose box centres
 #                  fall mostly outside it are dropped
 # min_box_px:      a track needs at least one box with a side this long
@@ -25,6 +25,7 @@ cameras:
     role: cab
     lane: [[1350, 1440], [3450, 1440], [3000, 0], [1800, 0]]
     min_box_px: 500
+    direction: +y     # cab drives towards the camera (down the image)
     clock_offset_s: [[0, 3.16], [2090, 4.38]]
   558:
     # Overhead down the entry lane; trucks drive away from the camera, so
@@ -34,6 +35,7 @@ cameras:
     role: codes
     lane: [[1680, 1440], [3450, 1440], [2950, 0], [2100, 0]]
     min_box_px: 500
+    direction: -y     # drives away from the camera (up the image)
     clock_offset_s: [[0, 6.59], [2090, 8.43]]
   559:
     # Same lane further on. Trucks in the outbound lane on the right
@@ -43,8 +45,39 @@ cameras:
     lane: [[1440, 1440], [3600, 1440], [3450, 0], [1950, 0]]
     min_box_px: 1200
     min_detections: 1
+    direction: -y
     clock_offset_s: [[0, 3.34], [2090, 4.81]]
   557:
-    role: ignore      # wide yard panorama, mostly straddle carriers
+    # Close side view at the gate (NOT a yard panorama — that impression
+    # came from frames with no truck in the lane). Entry trucks pass right
+    # to left: cab front first, then the side (vertical code), then the
+    # rear doors and plate. Near-duplicate of 560. The clock overlay is
+    # often unreadable against the sky.
+    # Outbound trucks pass just as close, left to right — only the
+    # direction check separates them. Trucks queue at the right edge,
+    # sometimes for over a minute before reaching the barrier, so passes
+    # are matched to events by when they end (anchor: end). Outbound
+    # trucks park in the background right of the booth (stationary check).
+    role: side
+    lane: [[0, 300], [5120, 300], [5120, 1440], [0, 1440]]
+    min_box_px: 1200
+    min_detections: 5   # drops 1-second fragments of crossing outbound trucks
+    direction: -x
+    min_bottom_px: 1250
+    stationary_s: 10
+    anchor: end
+    merge_gap_s: 40
+    opens_events: false
+    clock_offset_s: [[0, 6.85], [2090, 8.27]]
   560:
-    role: ignore      # near-duplicate of 557
+    role: side        # near-duplicate of 557; same rules
+    lane: [[0, 300], [5120, 300], [5120, 1440], [0, 1440]]
+    min_box_px: 1200
+    min_detections: 5   # drops 1-second fragments of crossing outbound trucks
+    direction: -x
+    min_bottom_px: 1250
+    stationary_s: 10
+    anchor: end
+    merge_gap_s: 40
+    opens_events: false
+    clock_offset_s: [[0, 4.48], [2090, 6.35]]

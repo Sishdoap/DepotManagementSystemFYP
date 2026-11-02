@@ -118,6 +118,42 @@ cameras:
         assert cfg.offset_at(2089.9) == 6.6
         assert cfg.offset_at(2090) == 8.4
 
+    def test_side_camera_settings(self, tmp_path):
+        configs = load_camera_configs(self.write(tmp_path, """
+cameras:
+  560:
+    role: side
+    lane: [[0, 0], [1, 0], [1, 1]]
+    direction: -x
+    min_bottom_px: 1250
+    stationary_s: 10
+    anchor: end
+    merge_gap_s: 40
+    opens_events: false
+"""))
+        cfg = configs["560"]
+        assert (cfg.role, cfg.direction, cfg.min_bottom_px, cfg.stationary_s) == ("side", "-x", 1250, 10)
+        assert (cfg.anchor, cfg.merge_gap_s, cfg.opens_events) == ("end", 40, False)
+
+    def test_defaults_leave_new_checks_off(self, tmp_path):
+        cfg = load_camera_configs(self.write(tmp_path, """
+cameras:
+  561: {role: cab, lane: [[0, 0], [1, 0], [1, 1]]}
+"""))["561"]
+        assert cfg.direction is None and cfg.min_bottom_px is None and cfg.stationary_s is None
+        assert cfg.anchor == "start" and cfg.merge_gap_s is None and cfg.opens_events
+
+    @pytest.mark.parametrize("bad", ["direction: left", "anchor: middle"])
+    def test_rejects_bad_direction_or_anchor(self, tmp_path, bad):
+        with pytest.raises(ValueError):
+            load_camera_configs(self.write(tmp_path, f"""
+cameras:
+  560:
+    role: side
+    lane: [[0, 0], [1, 0], [1, 1]]
+    {bad}
+"""))
+
     def test_rejects_unknown_role(self, tmp_path):
         with pytest.raises(ValueError, match="role"):
             load_camera_configs(self.write(tmp_path, "cameras:\n  1: {role: parking}\n"))
@@ -174,6 +210,37 @@ class TestLaneFilter:
         assert len(reasons) == 3
         assert reasons[0].startswith("only 1 frames") and reasons[1].startswith("small")
         assert reasons[2].startswith("outside entry lane")
+
+    def moving(self, xs, ys=None, side=400, dt=0.5):
+        ys = ys or [100] * len(xs)
+        return group_by_track([det(i * dt, side, track_id=1, at=(x, y))
+                               for i, (x, y) in enumerate(zip(xs, ys))])[0]
+
+    def test_wrong_way_rejected(self):
+        cfg = CameraConfig("557", "side", SQUARE, direction="-x", max_wrong_way_px=200)
+        assert pass_rejections(self.moving([100, 300, 500]), cfg)[-1].startswith("moves the wrong way")
+        assert pass_rejections(self.moving([500, 300, 100]), cfg) == []
+        # Small movement the "wrong" way is tolerated (jitter, short fragments).
+        assert pass_rejections(self.moving([100, 150, 200]), cfg) == []
+
+    def test_vertical_direction(self):
+        cfg = CameraConfig("558", "codes", SQUARE, direction="-y", max_wrong_way_px=200)
+        assert pass_rejections(self.moving([100] * 3, [100, 300, 500]), cfg)
+        assert pass_rejections(self.moving([100] * 3, [500, 300, 100]), cfg) == []
+
+    def test_stationary_rejected_only_when_long(self):
+        cfg = CameraConfig("557", "side", SQUARE, stationary_s=10, stationary_px=300)
+        parked = self.moving([100, 110, 120], dt=6.0)        # 12 s, moved 20 px
+        brief = self.moving([100, 110, 120], dt=1.0)         # 2 s
+        assert pass_rejections(parked, cfg)[-1].startswith("stationary")
+        assert pass_rejections(brief, cfg) == []
+
+    def test_far_vehicle_rejected_by_bottom_edge(self):
+        cfg = CameraConfig("557", "side", SQUARE, min_bottom_px=450)
+        far = self.moving([100, 110, 120], ys=[10, 10, 10], side=400)    # bottom 410
+        near = self.moving([100, 110, 120], ys=[10, 60, 60], side=400)   # bottom reaches 460
+        assert pass_rejections(far, cfg)[-1].startswith("far")
+        assert pass_rejections(near, cfg) == []
 
     def test_kept_pass_has_no_rejections(self):
         cfg = CameraConfig("558", "codes", SQUARE, min_box_px=300)

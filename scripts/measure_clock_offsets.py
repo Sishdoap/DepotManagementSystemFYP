@@ -30,7 +30,7 @@ import argparse
 import os
 import statistics
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 current_dir = Path(__file__).resolve().parent
@@ -43,6 +43,8 @@ from src.footage import load_camera_configs, parse_overlay_time, parse_recording
 
 # Overlay position in full-frame pixels (x1, y1, x2, y2); the same on every camera.
 OVERLAY_BOX = (0, 30, 1100, 200)
+# Real offsets are a few seconds; a reading further off than this is an OCR misread.
+MAX_PLAUSIBLE_OFFSET_S = 60
 
 
 def read_overlay(paddle, frame) -> str:
@@ -73,6 +75,10 @@ def measure_point(cap, paddle, info, fps, start_frame, max_frames, step):
         shown = parse_overlay_time(read_overlay(paddle, frame))
         if shown is None:
             continue
+        expected = info.started_at + timedelta(seconds=idx / fps)
+        displayed = datetime.combine(info.started_at.date(), shown)
+        if abs((displayed - expected).total_seconds()) > MAX_PLAUSIBLE_OFFSET_S:
+            continue                           # OCR misread a digit (seen once: -593 s on 557)
         if prev is not None and shown != prev[1]:
             if step > 1 and idx - prev[0] > 1:
                 # Coarse pass found the tick between prev[0] and idx; refine frame by frame.

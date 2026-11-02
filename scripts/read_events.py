@@ -46,20 +46,12 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 from src.events import extract_events
-from src.footage import load_camera_configs, load_tracks_csv, parse_recording_name
+from src.footage import crop_box, load_camera_configs, load_tracks_csv, parse_recording_name
 
 ROTATIONS = (0, 90, 180, 270)
 READ_ROLES = ("side", "codes", "backup")
 COLUMNS = ["event", "camera", "track_id", "frame", "t", "box_px", "rotation",
            "status", "code", "size_type", "edits", "mean_conf", "raw", "note"]
-
-
-def crop_box(frame, box, pad_frac=0.10):
-    h, w = frame.shape[:2]
-    x1, y1, x2, y2 = box
-    px, py = (x2 - x1) * pad_frac, (y2 - y1) * pad_frac
-    return frame[max(0, int(y1 - py)):min(h, int(y2 + py)),
-                 max(0, int(x1 - px)):min(w, int(x2 + px))]
 
 
 def main():
@@ -129,7 +121,7 @@ def main():
                 ok, frame = cap.read()
                 if not ok:
                     continue
-                crop = Image.fromarray(cv2.cvtColor(crop_box(frame, d.box), cv2.COLOR_BGR2RGB))
+                crop = Image.fromarray(cv2.cvtColor(crop_box(frame, d.box)[0], cv2.COLOR_BGR2RGB))
                 for rot in ROTATIONS:
                     img = crop if rot == 0 else crop.rotate(rot, expand=True)
                     fragments = ocr._ocr_one(img)

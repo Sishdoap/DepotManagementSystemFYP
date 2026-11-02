@@ -192,6 +192,19 @@ def load_tracks_csv(path) -> dict[str, list[Detection]]:
     return by_camera
 
 
+def crop_box(frame, box, pad_frac: float = 0.10):
+    """The detection box cut from a frame (numpy image), padded by `pad_frac` per side.
+
+    Returns (crop, (x0, y0)) with the crop's top-left corner in the frame,
+    so positions inside the crop can be related back to the box.
+    """
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = box
+    px, py = (x2 - x1) * pad_frac, (y2 - y1) * pad_frac
+    x0, y0 = max(0, int(x1 - px)), max(0, int(y1 - py))
+    return frame[y0:min(h, int(y2 + py)), x0:min(w, int(x2 + px))], (x0, y0)
+
+
 def wall_clock(info: RecordingInfo, seconds: float, offset_seconds: float = 0.0) -> datetime:
     """Wall-clock time of a moment `seconds` into the recording.
 

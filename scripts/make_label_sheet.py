@@ -51,8 +51,9 @@ from src.events import extract_events
 from src.footage import load_camera_configs, load_tracks_csv, parse_recording_name
 
 LABEL_COLUMNS = ["event", "entry_time", "cameras", "checked", "vehicle_type", "container_code",
-                 "size_type", "cargo_config", "code_legible", "make", "plate", "fleet_number",
-                 "notes", "pred_code", "pred_status", "pred_size_type", "suggested"]
+                 "size_type", "cargo_config", "code_legible", "make", "plate", "trailer_plate",
+                 "fleet_number", "notes", "pred_code", "pred_status", "pred_size_type",
+                 "pred_plate", "pred_trailer_plate", "suggested"]
 VEHICLE_TYPES = ["container_truck", "bobtail", "box_lorry", "light_vehicle", "other"]
 CARGO_CONFIGS = ["none", "1x20", "2x20", "1x40-45", "n/a"]
 LEGIBLE = ["yes", "partial", "no", "n/a"]
@@ -80,6 +81,27 @@ def save_crop(cap, frame_idx, box, path, pad_frac=0.10):
         scale = CROP_MAX_WIDTH / crop.shape[1]
         crop = cv2.resize(crop, (CROP_MAX_WIDTH, int(crop.shape[0] * scale)))
     cv2.imwrite(str(path), crop, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return True
+
+
+def save_plate_crop(cap, frame_idx, truck_box, rel_box, path, width=640):
+    """Zoomed crop around a plate; rel_box is the plate inside the truck box (0..1)."""
+    import cv2
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ok, frame = cap.read()
+    if not ok:
+        return False
+    bx1, by1, bx2, by2 = truck_box
+    bw, bh = bx2 - bx1, by2 - by1
+    x1, y1, x2, y2 = (bx1 + rel_box[0] * bw, by1 + rel_box[1] * bh,
+                      bx1 + rel_box[2] * bw, by1 + rel_box[3] * bh)
+    px, py = (x2 - x1) * 1.2 + 20, (y2 - y1) * 1.5 + 20      # context around the plate
+    h, w = frame.shape[:2]
+    crop = frame[max(0, int(y1 - py)):min(h, int(y2 + py)), max(0, int(x1 - px)):min(w, int(x2 + px))]
+    scale = width / crop.shape[1]
+    cv2.imwrite(str(path), cv2.resize(crop, (width, int(crop.shape[0] * scale)),
+                                      interpolation=cv2.INTER_CUBIC), [cv2.IMWRITE_JPEG_QUALITY, 92])
     return True
 
 
@@ -121,6 +143,8 @@ def main():
 
     events = {int(r["event"]): r for r in read_csv(events_dir / "events.csv")}
     fused = {int(r["event"]): r for r in read_csv(events_dir / "fused.csv")}
+    plates = ({int(r["event"]): r for r in read_csv(events_dir / "plates.csv")}
+              if (events_dir / "plates.csv").exists() else {})
     reads = [r for r in read_csv(events_dir / "reads.csv") if r["camera"] == codes_cam]
     suggestions = ({int(r["event"]): r for r in read_csv(args.suggestions)}
                    if args.suggestions else {})
@@ -133,23 +157,41 @@ def main():
 
     import cv2
 
-    caps = {cam: cv2.VideoCapture(str(videos[cam])) for cam in (cab_cam, codes_cam)}
+    caps = {cam: cv2.VideoCapture(str(videos[cam])) for cam in ex.chain}
+    truck_boxes = {(cam, d.frame): d.box for (cam, _), dets in ex.detections.items() for d in dets}
     rows, images = [], {}
     for i, e in enumerate(ex.events, 1):
-        ev, fu = events[i], fused.get(i, {})
+        ev, fu, pl = events[i], fused.get(i, {}), plates.get(i, {})
         row = {c: "" for c in LABEL_COLUMNS}
         row.update(event=i, entry_time=ev["entry_time"], cameras=ev["cameras"], checked="no",
                    container_code=fu.get("all_code", ""), size_type=fu.get("all_size_type", ""),
                    pred_code=fu.get("all_code", ""), pred_status=fu.get("all_status", ""),
-                   pred_size_type=fu.get("all_size_type", ""))
+                   pred_size_type=fu.get("all_size_type", ""),
+                   plate=pl.get("vehicle_plate", ""), trailer_plate=pl.get("trailer_plate", ""),
+                   pred_plate=pl.get("vehicle_plate", ""),
+                   pred_trailer_plate=pl.get("trailer_plate", ""))
         suggested = []
         for col, value in suggestions.get(i, {}).items():
             if col in LABEL_COLUMNS and col != "event" and value:
                 row[col] = value
                 suggested.append(col)
         row["suggested"] = " ".join(suggested)
-        if i in existing:                       # earlier corrections win over everything
-            row.update({c: existing[i].get(c, row[c]) for c in LABEL_COLUMNS})
+        if i in existing:
+            old = existing[i]
+            prefilled = {c: row[c] for c in LABEL_COLUMNS}
+            # Earlier labels win over everything...
+            row.update({c: old[c] for c in LABEL_COLUMNS if c in old})
+            # ...except that a blank label is not a correction: fill it from the new
+            # prediction, shade it as a suggestion, and ask for the row to be re-checked.
+            filled = [c for c in LABEL_COLUMNS
+                      if not c.startswith("pred_") and c not in ("checked", "suggested", "notes")
+                      and not old.get(c) and prefilled[c]]
+            for c in filled:
+                row[c] = prefilled[c]
+            if filled:
+                row["checked"] = "no"
+                row["suggested"] = " ".join(sorted(set(row["suggested"].split()) | set(filled)))
+            row.update({c: prefilled[c] for c in LABEL_COLUMNS if c.startswith("pred_")})
         rows.append(row)
 
         images[i] = []
@@ -169,6 +211,21 @@ def main():
             name = f"event_{i:03d}_doors.jpg"
             if save_crop(caps[codes_cam], d.frame, d.box, out_dir / "crops" / name):
                 images[i].append((f"rear / doors — camera {codes_cam}, frame {d.frame}",
+                                  f"crops/{name}"))
+        # Zoomed plate crops from the frame where each fused plate was read best.
+        for kind in ("vehicle", "trailer"):
+            evidence = pl.get(f"{kind}_evidence", "")
+            if not evidence:
+                continue
+            cam, frame_idx, box = evidence.split(":")
+            frame_idx, rel = int(frame_idx), tuple(float(v) for v in box.split(","))
+            if (cam, frame_idx) not in truck_boxes:
+                continue
+            name = f"event_{i:03d}_{kind}_plate.jpg"
+            if save_plate_crop(caps[cam], frame_idx, truck_boxes[(cam, frame_idx)], rel,
+                               out_dir / "crops" / name):
+                images[i].append((f"{kind} plate as read ({pl[f'{kind}_plate']}, "
+                                  f"{pl[f'{kind}_support']} frames) — camera {cam}, frame {frame_idx}",
                                   f"crops/{name}"))
     for cap in caps.values():
         cap.release()
@@ -261,7 +318,10 @@ HTML_TEMPLATE = """<!doctype html>
 <dialog id="zoom"><img alt=""></dialog>
 <script>
 const DATA = /*DATA*/null;
-const KEY = "depot-footage-labels-v1";
+// Bump when the sheet is regenerated with new columns or pre-fills, so a
+// browser's autosave of an older sheet cannot override them (labels.csv,
+// which the sheet starts from, already holds every exported correction).
+const KEY = "depot-footage-labels-v2";
 const COLS = DATA.columns;
 
 function load() {
@@ -347,10 +407,12 @@ function render() {
         ${field(row, "code_legible", "select", DATA.legible)}
         ${field(row, "make", "text")}
         ${field(row, "plate", "text")}
+        ${field(row, "trailer_plate", "text")}
         ${field(row, "fleet_number", "text")}
         ${field(row, "notes", "textarea")}
         <div class="pred">Pipeline: ${esc(row.pred_code) || "no code"} ${row.pred_status ? "(" + esc(row.pred_status) + ")" : ""}
-          ${row.pred_size_type ? "· " + esc(row.pred_size_type) : ""}</div>
+          ${row.pred_size_type ? "· " + esc(row.pred_size_type) : ""}
+          · plate ${esc(row.pred_plate) || "–"} · trailer ${esc(row.pred_trailer_plate) || "–"}</div>
         <label class="checked"><input type="checkbox" data-col="checked" ${row.checked === "yes" ? "checked" : ""}>
           I have checked every field of this event</label>
       </form></section>`;
@@ -379,7 +441,7 @@ document.getElementById("events").addEventListener("input", ev => {
     row.checked = el.checked ? "yes" : "no";
     sec.classList.toggle("done", el.checked);
   } else {
-    row[col] = col === "container_code" || col === "size_type" || col === "plate"
+    row[col] = ["container_code", "size_type", "plate", "trailer_plate"].includes(col)
       ? el.value.toUpperCase().trim().replace(/\\s+/g, " ") : el.value;
     el.classList.remove("sugg");
     row.suggested = (row.suggested || "").split(" ").filter(c => c && c !== col).join(" ");

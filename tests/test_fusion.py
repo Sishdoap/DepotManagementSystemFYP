@@ -11,7 +11,7 @@ if str(root_dir) not in sys.path:
 
 import pytest
 
-from src.fusion import FrameRead, StatusWeightedVoteFuser, best_reading
+from src.fusion import FrameRead, MultiContainerFuser, StatusWeightedVoteFuser, best_reading
 
 A = "EMCU6461774"
 B = "OKMJ5632838"
@@ -98,3 +98,46 @@ class TestVoteFuser:
     def test_configurable_support(self):
         lenient = StatusWeightedVoteFuser(min_inferred_support=1)
         assert lenient.fuse([fr("inferred", B)]).code == B
+
+    def test_single_fuser_codes_tuple(self):
+        assert self.fuser.fuse([fr("verified", A)]).codes == (A,)
+        assert self.fuser.fuse([]).codes == ()
+
+
+C = "MSKU3398188"
+
+
+def frames(code, n, status="verified", size_type=None, start=0, camera="557"):
+    return [fr(status, code, frame=start + i, camera=camera, size_type=size_type) for i in range(n)]
+
+
+class TestMultiContainerFuser:
+    fuser = MultiContainerFuser()
+
+    def test_second_20ft_container_added(self):
+        # Event 6: rear code from 558, front code on many side frames.
+        reads = frames(A, 30, size_type="22G1") + frames(C, 25, start=100)
+        out = self.fuser.fuse(reads)
+        assert out.code == A and out.codes == (A, C)
+        assert "second container" in out.note
+
+    def test_few_validated_misreads_not_added(self):
+        # Event 15: a misread passed recovery on 2 frames.
+        reads = frames(A, 10, size_type="22G1") + frames(C, 2, status="recovered", start=100)
+        assert self.fuser.fuse(reads).codes == (A,)
+
+    def test_inferred_reads_never_make_a_second_code(self):
+        reads = frames(A, 10, size_type="22G1") + frames(C, 9, status="inferred", start=100)
+        assert self.fuser.fuse(reads).codes == (A,)
+
+    def test_40ft_container_has_no_second(self):
+        reads = frames(A, 30, size_type="45G1") + frames(C, 25, start=100)
+        assert self.fuser.fuse(reads).codes == (A,)
+
+    def test_at_most_two_codes(self):
+        reads = (frames(A, 30, size_type="22G1") + frames(C, 20, start=100)
+                 + frames(B, 10, start=200))
+        assert self.fuser.fuse(reads).codes == (A, C)
+
+    def test_no_primary_no_codes(self):
+        assert self.fuser.fuse(frames(B, 1, status="inferred")).codes == ()

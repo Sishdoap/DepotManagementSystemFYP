@@ -15,18 +15,26 @@ A level is applied by treating every reading below it as failed before
 the per-frame best rotation is chosen, so "raw" really means a pipeline
 that only ever outputs verified codes.
 
-Outcome of one prediction against one label:
+A vehicle's label is a *set* of codes: empty (no container), one, or two
+(a 2x20 ft chassis — events 2 and 6 on the footage).
 
-    correct       a code was output and it equals the label
-    wrong         a code was output and it differs (the costly error:
-                  a wrong container is booked in)
+Outcome of one vehicle's predicted codes against its label:
+
+    correct       exactly the labelled codes were output
+    partial       some labelled codes were output, none wrong (e.g. only
+                  one container of a 2x20)
+    wrong         at least one output code is not on the vehicle (the
+                  costly error: a wrong container is booked in)
     missed        the vehicle carries a container but no code was output
     false_code    the vehicle carries no container but a code was output
     correct_none  no container and no code
 
-Character accuracy compares an output code with the label position by
-position after alignment (1 - edit distance / 11), only where a code was
-output — a missed read has no characters to compare.
+A single frame shows one container, so a frame counts as correct if its
+code is any of the vehicle's codes (`outcome`).
+
+Character accuracy compares each output code with the closest labelled
+code (1 - edit distance / 11), only where a code was output — a missed
+read has no characters to compare.
 """
 
 from __future__ import annotations
@@ -43,16 +51,39 @@ LEVELS = {
     "recovered": {VERIFIED, RECOVERED},
     "inferred": {VERIFIED, RECOVERED, INFERRED},
 }
-OUTCOMES = ("correct", "wrong", "missed", "false_code", "correct_none")
+OUTCOMES = ("correct", "partial", "wrong", "missed", "false_code", "correct_none")
+CONTAINER_OUTCOMES = ("correct", "partial", "wrong", "missed")
 
 
-def outcome(pred: Optional[str], truth: Optional[str]) -> str:
-    """Classify one prediction against one label (see module docstring)."""
+def _as_set(truth) -> frozenset:
+    """A label as a set of codes: None/"" -> empty, "A B" or "A" -> {A, B}, iterable -> set."""
+    if not truth:
+        return frozenset()
+    if isinstance(truth, str):
+        return frozenset(truth.split())
+    return frozenset(truth)
+
+
+def outcome(pred: Optional[str], truth) -> str:
+    """One frame's code against the vehicle's label (any labelled code is correct)."""
+    truth = _as_set(truth)
     if truth:
         if not pred:
             return "missed"
-        return "correct" if pred == truth else "wrong"
+        return "correct" if pred in truth else "wrong"
     return "false_code" if pred else "correct_none"
+
+
+def vehicle_outcome(preds: Sequence[str], truth) -> str:
+    """A vehicle's predicted codes against its label (see module docstring)."""
+    truth, preds = _as_set(truth), set(preds)
+    if not truth:
+        return "false_code" if preds else "correct_none"
+    if not preds:
+        return "missed"
+    if preds - truth:
+        return "wrong"
+    return "correct" if preds == truth else "partial"
 
 
 def edit_distance(a: str, b: str) -> int:
@@ -83,16 +114,29 @@ class Tally:
     counts: Counter = field(default_factory=Counter)
     char_accs: list[float] = field(default_factory=list)
 
-    def add(self, pred: Optional[str], truth: Optional[str]) -> str:
+    def add(self, pred: Optional[str], truth) -> str:
+        """Score one frame."""
         o = outcome(pred, truth)
         self.counts[o] += 1
-        if pred and truth:
-            self.char_accs.append(char_accuracy(pred, truth))
+        self._char(pred and [pred], truth)
         return o
+
+    def add_vehicle(self, preds: Sequence[str], truth) -> str:
+        """Score one vehicle's fused codes."""
+        o = vehicle_outcome(preds, truth)
+        self.counts[o] += 1
+        self._char(preds, truth)
+        return o
+
+    def _char(self, preds, truth) -> None:
+        truth = _as_set(truth)
+        for p in preds or []:
+            if truth:
+                self.char_accs.append(max(char_accuracy(p, t) for t in truth))
 
     @property
     def with_container(self) -> int:
-        return self.counts["correct"] + self.counts["wrong"] + self.counts["missed"]
+        return sum(self.counts[k] for k in CONTAINER_OUTCOMES)
 
     @property
     def without_container(self) -> int:

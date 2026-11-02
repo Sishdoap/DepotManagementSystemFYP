@@ -10,7 +10,8 @@ again:
    matters for the dashboard replay; this table says whether it is safe.
 2. Fusion: per event, fuses the frames (best rotation per frame) per
    camera (multi-frame) and over all cameras (cross-camera) with
-   src.fusion.StatusWeightedVoteFuser.
+   src.fusion.MultiContainerFuser (two codes on a 2x20 ft truck,
+   space-separated in the code columns).
 
 Codes here are predictions; nothing is scored against ground truth until
 the M3 labels exist (M4).
@@ -34,7 +35,7 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.fusion import FrameRead, StatusWeightedVoteFuser, best_reading, load_frame_reads
+from src.fusion import FrameRead, MultiContainerFuser, best_reading, load_frame_reads
 from src.iso6346_recovery import STATUS_RANK, RECOVERED
 
 ROTATIONS = (0, 90, 180, 270)
@@ -62,7 +63,7 @@ def main():
     parser.add_argument("--out", default="results/events/fused.csv")
     args = parser.parse_args()
 
-    fuser = StatusWeightedVoteFuser()
+    fuser = MultiContainerFuser()
     by_frame = load_frame_reads(args.reads)
     cameras = sorted({cam for _, cam, _ in by_frame})
     with open(args.events) as f:
@@ -108,7 +109,7 @@ def main():
         for scope in scopes:
             frames = all_frames if scope == "all" else best.get((ev, scope), [])
             out = fuser.fuse(frames)
-            row[f"{scope}_code"] = out.code or ""
+            row[f"{scope}_code"] = " ".join(out.codes)     # two codes on a 2x20 ft truck
             row[f"{scope}_status"] = out.status if frames else ""
             row[f"{scope}_support"] = out.support
             row[f"{scope}_size_type"] = out.size_type or ""

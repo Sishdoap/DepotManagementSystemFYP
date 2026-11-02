@@ -287,10 +287,8 @@ function letterValue(ch) {
   }
   return null;
 }
-function codeHint(code) {
-  code = (code || "").toUpperCase().replace(/\\s+/g, "");
-  if (!code) return ["", ""];
-  if (!/^[A-Z]{3}[UJZ][0-9]{7}$/.test(code)) return ["bad", "format: 3 letters + U/J/Z + 7 digits"];
+function oneCodeHint(code) {
+  if (!/^[A-Z]{3}[UJZ][0-9]{7}$/.test(code)) return ["bad", `${code}: format is 3 letters + U/J/Z + 7 digits`];
   let sum = 0;
   for (let i = 0; i < 10; i++) {
     const ch = code[i];
@@ -299,8 +297,17 @@ function codeHint(code) {
   }
   const check = (sum % 11) % 10;
   return Number(code[10]) === check
-    ? ["ok", "check digit valid"]
-    : ["warn", `check digit should be ${check} — typo, or printed wrong on the box?`];
+    ? ["ok", `${code}: check digit valid`]
+    : ["warn", `${code}: check digit should be ${check} — typo, or printed wrong on the box?`];
+}
+// One code, or two separated by a space for a 2x20 ft truck.
+function codeHint(field) {
+  const codes = (field || "").toUpperCase().split(/\\s+/).filter(Boolean);
+  if (!codes.length) return ["", ""];
+  if (codes.length > 2) return ["bad", "at most two codes (2x20 ft)"];
+  const hints = codes.map(oneCodeHint);
+  const worst = ["bad", "warn", "ok"].find(level => hints.some(([c]) => c === level));
+  return [worst, hints.map(([, t]) => t).join(" · ")];
 }
 
 function field(row, col, kind, options) {
@@ -373,7 +380,7 @@ document.getElementById("events").addEventListener("input", ev => {
     sec.classList.toggle("done", el.checked);
   } else {
     row[col] = col === "container_code" || col === "size_type" || col === "plate"
-      ? el.value.toUpperCase().trim() : el.value;
+      ? el.value.toUpperCase().trim().replace(/\\s+/g, " ") : el.value;
     el.classList.remove("sugg");
     row.suggested = (row.suggested || "").split(" ").filter(c => c && c !== col).join(" ");
     if (col === "container_code") updateHint(sec);

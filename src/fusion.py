@@ -56,6 +56,23 @@ class FrameRead:
     edits: int = 0
     conf: float = 0.0
     rotation: int = 0
+    box_px: float = 0.0              # longest side of the truck box (frame size proxy)
+
+
+def load_frame_reads(path) -> dict[tuple[int, str, int], list[FrameRead]]:
+    """Read scripts/read_events.py output: {(event, camera, frame): [one FrameRead per rotation]}."""
+    import csv
+
+    by_frame: dict[tuple[int, str, int], list[FrameRead]] = defaultdict(list)
+    with open(path) as f:
+        for r in csv.DictReader(f):
+            by_frame[(int(r["event"]), r["camera"], int(r["frame"]))].append(FrameRead(
+                camera=r["camera"], frame=int(r["frame"]), status=r["status"],
+                code=r["code"] or None, size_type=r["size_type"] or None,
+                edits=int(r["edits"]), conf=float(r["mean_conf"]), rotation=int(r["rotation"]),
+                box_px=float(r["box_px"]),
+            ))
+    return dict(by_frame)
 
 
 def best_reading(reads: Iterable[FrameRead]) -> FrameRead:

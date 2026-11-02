@@ -3,9 +3,10 @@
 Third stage of the event extractor, after scripts/track_trucks.py and
 scripts/extract_events.py. For each event (rebuilt from tracks.csv with
 the same code as extract_events.py, so numbering matches events.csv) it
-takes every tracked frame on the cameras whose role is "codes" or
-"backup" (558, 559), crops the truck box, and runs PaddleOCR on the GPU
-at all four rotations.
+takes every tracked frame on the cameras whose role is "side", "codes" or
+"backup" (557, 560, 558, 559), crops the truck box, and runs PaddleOCR on
+the GPU at all four rotations. The side cameras show the container code
+printed vertically, which the 90°/270° rotations read.
 
 Every rotation's reading is stored, not just the best, so that
 - the per-camera rotation question (is one fixed rotation enough?) can be
@@ -21,11 +22,13 @@ Frames where the truck's box is small (longest side < --min-box-px) are
 skipped: the truck is still far away and the code is unreadable.
 
 Output (results/ is gitignored):
-    results/events/reads.csv   one row per (frame, rotation)
+    results/events/reads.csv   one row per (frame, rotation); rows of
+                               cameras not read in this run are kept
 
 Usage:
     python scripts/read_events.py
-    python scripts/read_events.py --events 2 4      # only some events
+    python scripts/read_events.py --cameras 557 560  # add cameras, keep the rest
+    python scripts/read_events.py --events 2 4 --out /tmp/test.csv
 """
 
 import argparse
@@ -46,7 +49,9 @@ from src.events import extract_events
 from src.footage import load_camera_configs, load_tracks_csv, parse_recording_name
 
 ROTATIONS = (0, 90, 180, 270)
-READ_ROLES = ("codes", "backup")
+READ_ROLES = ("side", "codes", "backup")
+COLUMNS = ["event", "camera", "track_id", "frame", "t", "box_px", "rotation",
+           "status", "code", "size_type", "edits", "mean_conf", "raw", "note"]
 
 
 def crop_box(frame, box, pad_frac=0.10):
@@ -65,6 +70,8 @@ def main():
     parser.add_argument("--tracks", default="results/events/tracks.csv")
     parser.add_argument("--out", default="results/events/reads.csv")
     parser.add_argument("--events", nargs="*", type=int, default=None)
+    parser.add_argument("--cameras", nargs="*", default=None,
+                        help="Only read these cameras; existing rows for other cameras are kept.")
     parser.add_argument("--min-box-px", type=float, default=600)
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
@@ -74,7 +81,8 @@ def main():
               if (info := parse_recording_name(p.name))}
     infos = {cam: parse_recording_name(p.name) for cam, p in videos.items()}
     ex = extract_events(load_tracks_csv(args.tracks), configs, infos)
-    read_cams = [c for c in ex.chain if configs[c].role in READ_ROLES]
+    read_cams = [c for c in ex.chain if configs[c].role in READ_ROLES
+                 and (not args.cameras or c in args.cameras)]
 
     # (camera -> [(event no, Detection), ...]) so each video is opened once.
     todo = defaultdict(list)
@@ -102,11 +110,18 @@ def main():
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    kept = []
+    if out.exists():
+        with out.open() as f:
+            kept = [r for r in csv.DictReader(f) if r["camera"] not in read_cams]
+        if kept:
+            print(f"Keeping {len(kept)} existing rows for cameras "
+                  f"{', '.join(sorted({r['camera'] for r in kept}))}")
     t0, done = time.time(), 0
     with out.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["event", "camera", "track_id", "frame", "t", "box_px", "rotation",
-                         "status", "code", "size_type", "edits", "mean_conf", "raw", "note"])
+        writer.writerow(COLUMNS)
+        writer.writerows([r[c] for c in COLUMNS] for r in kept)
         for cam, items in todo.items():
             cap = cv2.VideoCapture(str(videos[cam]))
             for event_no, d in sorted(items, key=lambda x: x[1].frame):

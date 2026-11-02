@@ -34,23 +34,10 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.fusion import FrameRead, StatusWeightedVoteFuser, best_reading
+from src.fusion import FrameRead, StatusWeightedVoteFuser, best_reading, load_frame_reads
 from src.iso6346_recovery import STATUS_RANK, RECOVERED
 
 ROTATIONS = (0, 90, 180, 270)
-
-
-def load_reads(path):
-    """{(event, camera, frame): [FrameRead per rotation]}"""
-    by_frame = defaultdict(list)
-    with open(path) as f:
-        for r in csv.DictReader(f):
-            by_frame[(int(r["event"]), r["camera"], int(r["frame"]))].append(FrameRead(
-                camera=r["camera"], frame=int(r["frame"]), status=r["status"],
-                code=r["code"] or None, size_type=r["size_type"] or None,
-                edits=int(r["edits"]), conf=float(r["mean_conf"]), rotation=int(r["rotation"]),
-            ))
-    return by_frame
 
 
 def frames_for(by_frame, rotation=None):
@@ -76,7 +63,7 @@ def main():
     args = parser.parse_args()
 
     fuser = StatusWeightedVoteFuser()
-    by_frame = load_reads(args.reads)
+    by_frame = load_frame_reads(args.reads)
     cameras = sorted({cam for _, cam, _ in by_frame})
     with open(args.events) as f:
         events = {int(r["event"]): r for r in csv.DictReader(f)}

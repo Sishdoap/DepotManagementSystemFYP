@@ -12,3 +12,5 @@ ultralytics==8.4.192
 ultralytics-thop==2.2.3
 polars==2.1.0
 polars-runtime-32==2.1.0
+# ByteTrack's assignment solver (scripts/track_trucks.py)
+lap==0.5.13

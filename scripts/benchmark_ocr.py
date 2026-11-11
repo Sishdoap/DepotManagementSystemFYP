@@ -86,6 +86,11 @@ def main():
         help="cpu or cuda (for CCLN).",
     )
     parser.add_argument(
+        "--paddle-gpu",
+        action="store_true",
+        help="Run PaddleOCR on the GPU (needs paddlepaddle-gpu; see requirements-gpu.txt).",
+    )
+    parser.add_argument(
         "--all-rotations",
         action="store_true",
         help="Run every rotation even after a valid read, so the saved "
@@ -114,7 +119,7 @@ def main():
     ocr = RealOCRAdapter(
         ccln_weights_path=args.ccln_weights,
         device=args.device,
-        paddle_gpu=False,
+        paddle_gpu=args.paddle_gpu,
         use_localization=True,
         try_rotations=not args.no_rotations,
         try_all_rotations=args.all_rotations,

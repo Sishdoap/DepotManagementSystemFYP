@@ -13,3 +13,7 @@ CLAUDE.md
 /docs
 /results
 /videos
+# camera stream credentials (RTSP links from the collaborator)
+.env
+.env.*
+/weights

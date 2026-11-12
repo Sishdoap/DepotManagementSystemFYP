@@ -42,7 +42,7 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.footage import Detection, load_camera_configs, parse_recording_name
+from src.footage import Detection, find_recordings, load_camera_configs, parse_recording_name
 
 
 # COCO classes a container truck can be detected as. Prime movers with a
@@ -112,8 +112,7 @@ def main():
     configs = load_camera_configs(args.config)
     wanted = set(args.cameras) if args.cameras else {c for c, cfg in configs.items()
                                                      if cfg.role != "ignore"}
-    videos = sorted(p for p in Path(args.videos_dir).glob("*.mp4")
-                    if (info := parse_recording_name(p.name)) and info.camera in wanted)
+    videos = sorted(p for cam, p in find_recordings(args.videos_dir).items() if cam in wanted)
     if not videos:
         sys.exit(f"No recordings for cameras {sorted(wanted)} in {args.videos_dir}/")
     print(f"Tracking {len(videos)} videos at {args.sample_fps} fps: cameras "

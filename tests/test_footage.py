@@ -13,9 +13,9 @@ if str(root_dir) not in sys.path:
 import pytest
 
 from src.footage import (
-    CameraConfig, Detection, group_by_track, group_into_passes, keep_entry_lane_passes,
-    load_camera_configs, load_tracks_csv, parse_overlay_time, parse_recording_name,
-    pass_rejections, point_in_polygon, wall_clock,
+    CameraConfig, Detection, RecordingInfo, find_recordings, group_by_track, group_into_passes,
+    keep_entry_lane_passes, load_camera_configs, load_tracks_csv, parse_overlay_time,
+    parse_recording_name, pass_rejections, point_in_polygon, wall_clock,
 )
 
 NAME = "vlc-record-2026-08-12-09h15m42s-rtsp___175.138.143.18_558_Streaming_Channels_101-.mp4"
@@ -43,6 +43,26 @@ class TestRecordingName:
     def test_wall_clock(self):
         info = parse_recording_name(NAME)
         assert wall_clock(info, 90.5) == datetime(2026, 8, 12, 9, 17, 12, 500000)
+
+    def test_parses_own_recordings(self):
+        info = parse_recording_name("/rec/2026-11-13/0900/cam561_2026-11-13_09-00-02.mkv")
+        assert info == RecordingInfo("561", datetime(2026, 11, 13, 9, 0, 2))
+        assert parse_recording_name("cam561_2026-11-13.mkv") is None
+
+
+class TestFindRecordings:
+    def test_one_file_per_camera_both_formats(self, tmp_path):
+        for name in (NAME, "cam561_2026-11-13_09-00-02.mkv", "notes.txt", "cam560_x.mkv"):
+            (tmp_path / name).touch()
+        found = find_recordings(tmp_path)
+        assert sorted(found) == ["558", "561"]
+        assert found["561"].name == "cam561_2026-11-13_09-00-02.mkv"
+
+    def test_two_files_for_one_camera_is_an_error(self, tmp_path):
+        (tmp_path / "cam558_2026-11-13_09-00-02.mkv").touch()
+        (tmp_path / "cam558_2026-11-13_09-31-40.mkv").touch()     # after a reconnect
+        with pytest.raises(ValueError, match="558"):
+            find_recordings(tmp_path)
 
 
 class TestGrouping:

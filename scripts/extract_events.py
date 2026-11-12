@@ -38,7 +38,7 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 from src.events import extract_events
-from src.footage import Detection, load_camera_configs, load_tracks_csv, parse_recording_name
+from src.footage import Detection, find_recordings, load_camera_configs, load_tracks_csv, parse_recording_name
 
 SHEET_FRAMES_PER_CAMERA = 4
 SHEET_TILE_HEIGHT = 360
@@ -137,8 +137,7 @@ def main():
     args = parser.parse_args()
 
     configs = load_camera_configs(args.config)
-    videos = {info.camera: p for p in Path(args.videos_dir).glob("*.mp4")
-              if (info := parse_recording_name(p.name))}
+    videos = find_recordings(args.videos_dir)
     infos = {cam: parse_recording_name(p.name) for cam, p in videos.items()}
     out_dir = Path(args.out_dir)
 

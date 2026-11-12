@@ -1,12 +1,18 @@
 """Helpers for working with the collaborator's depot CCTV footage.
 
-The footage is a set of simultaneous recordings, one file per camera, named
-by VLC after the RTSP stream they were recorded from, e.g.
+The footage is a set of simultaneous recordings, one file per camera. Two
+naming schemes exist:
 
     vlc-record-2026-08-12-09h15m42s-rtsp___175.138.143.18_558_Streaming_Channels_101-.mp4
+        the 12 Aug hour, recorded by the collaborator with VLC; the number
+        before "_Streaming" is the camera's RTSP port
+    cam558_2026-11-13_09-00-02.mkv
+        our own recordings of the live streams (scripts/record_streams.py),
+        one folder per hour
 
-The date/time in the name is when the recording started, and the number
-before "_Streaming" is the camera's RTSP port, used here as the camera id.
+Either way the date/time in the name is when the recording started and the
+RTSP port is used as the camera id. `find_recordings` collects one folder
+of simultaneous recordings for the pipeline scripts.
 
 This module stays free of model code so it can be unit-tested; detection
 itself lives in scripts/scan_trucks.py.
@@ -24,22 +30,46 @@ from typing import Iterable, Optional
 _VLC_NAME_RE = re.compile(
     r"vlc-record-(\d{4})-(\d{2})-(\d{2})-(\d{2})h(\d{2})m(\d{2})s-rtsp_+[\d.]+_(\d+)_"
 )
+_CAM_NAME_RE = re.compile(r"^cam(\d+)_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})\.\w+$")
+VIDEO_SUFFIXES = (".mp4", ".mkv")
 
 
 @dataclass(frozen=True)
 class RecordingInfo:
-    """Camera id and recording start time parsed from a VLC filename."""
+    """Camera id and recording start time parsed from a recording filename."""
     camera: str               # RTSP port, e.g. "558"
     started_at: datetime      # wall-clock time of the first frame
 
 
 def parse_recording_name(name: str) -> Optional[RecordingInfo]:
-    """Parse a VLC recording filename; None if it doesn't match."""
-    m = _VLC_NAME_RE.search(Path(name).name)
-    if not m:
+    """Parse a VLC or own recording filename; None if it matches neither."""
+    name = Path(name).name
+    if m := _VLC_NAME_RE.search(name):
+        y, mo, d, h, mi, s, port = m.groups()
+    elif m := _CAM_NAME_RE.match(name):
+        port, y, mo, d, h, mi, s = m.groups()
+    else:
         return None
-    y, mo, d, h, mi, s, port = m.groups()
     return RecordingInfo(port, datetime(int(y), int(mo), int(d), int(h), int(mi), int(s)))
+
+
+def find_recordings(videos_dir) -> dict[str, Path]:
+    """{camera: video file} for one folder of simultaneous recordings.
+
+    Takes .mp4 and .mkv files whose names parse. A camera with two files
+    (our recorder starts a new file after a dropped connection) is an error
+    rather than a silent pick: the pipeline treats each file as the whole
+    period, so the caller must choose.
+    """
+    found: dict[str, list[Path]] = {}
+    for p in sorted(Path(videos_dir).expanduser().iterdir()):
+        if p.suffix.lower() in VIDEO_SUFFIXES and (info := parse_recording_name(p.name)):
+            found.setdefault(info.camera, []).append(p)
+    dup = {cam: ps for cam, ps in found.items() if len(ps) > 1}
+    if dup:
+        detail = "; ".join(f"{cam}: {', '.join(p.name for p in ps)}" for cam, ps in sorted(dup.items()))
+        raise ValueError(f"more than one recording per camera in {videos_dir} ({detail})")
+    return {cam: ps[0] for cam, ps in found.items()}
 
 
 @dataclass(frozen=True)

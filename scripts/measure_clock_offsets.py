@@ -39,7 +39,7 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.footage import load_camera_configs, parse_overlay_time, parse_recording_name
+from src.footage import find_recordings, load_camera_configs, parse_overlay_time, parse_recording_name
 
 # Overlay position in full-frame pixels (x1, y1, x2, y2); the same on every camera.
 OVERLAY_BOX = (0, 30, 1100, 200)
@@ -116,9 +116,9 @@ def main():
     wanted = set(args.cameras) if args.cameras else {c for c, cfg in configs.items()
                                                      if cfg.role != "ignore"}
 
-    for path in sorted(Path(args.videos_dir).glob("*.mp4")):
+    for _, path in sorted(find_recordings(args.videos_dir).items()):
         info = parse_recording_name(path.name)
-        if not info or info.camera not in wanted:
+        if info.camera not in wanted:
             continue
         cap = cv2.VideoCapture(str(path))
         fps = cap.get(cv2.CAP_PROP_FPS) or 20.0

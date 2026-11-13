@@ -276,6 +276,8 @@ class RealOCRAdapter(OCRAdapter):
         try_rotations: bool = True,
         try_all_rotations: bool = False,
         reader_config=None,
+        det_max_side: Optional[int] = None,
+        gpu_mem_mb: Optional[int] = None,
     ):
         """
         Args:
@@ -292,6 +294,10 @@ class RealOCRAdapter(OCRAdapter):
                 yields a valid code, so `fragments_by_rotation` is complete.
                 For benchmarking only — about 4x slower.
             reader_config: iso6346_recovery.ReaderConfig; None for defaults.
+            det_max_side: cap on the text-detection image size (see
+                `_init_paddle`); None keeps PaddleOCR's full resolution.
+            gpu_mem_mb: cap on Paddle's GPU memory (see `_init_paddle`);
+                None leaves Paddle's default (grow as needed).
         """
         # Imports are local because torch/paddle are heavy and we only want
         # to pay the import cost when the real adapter is actually used.
@@ -307,7 +313,7 @@ class RealOCRAdapter(OCRAdapter):
 
         self._device = torch.device(device)
         self._ccln = load_ccln(ccln_weights_path, self._device)
-        self._paddle = self._init_paddle(paddle_gpu)
+        self._paddle = self._init_paddle(paddle_gpu, det_max_side, gpu_mem_mb)
         self._use_localization = use_localization
         self._try_rotations = try_rotations
         self._try_all_rotations = try_all_rotations
@@ -322,8 +328,35 @@ class RealOCRAdapter(OCRAdapter):
         return f"RealOCRAdapter({self._device}, {loc}, {rot})"
 
     @staticmethod
-    def _init_paddle(use_gpu: bool):
+    def _init_paddle(use_gpu: bool, det_max_side: Optional[int] = None,
+                     gpu_mem_mb: Optional[int] = None):
+        """PaddleOCR with this project's settings.
+
+        `det_max_side` caps the image size used for *text detection* (the
+        found text lines are still recognised from the full-resolution
+        image). By default PP-OCRv5 detects at full resolution, so a
+        4000-px side-camera crop at four rotations is a long, memory-hungry
+        GPU job; on a GPU that also drives the display and another
+        program, the PC ran out of memory, the screen blinked black and
+        Paddle died with CUDA error 999 (2026-11-13). Footage readers
+        pass 1920.
+
+        `gpu_mem_mb` caps the GPU memory Paddle's allocator may take
+        (FLAGS_gpu_memory_limit_mb). Over the cap Paddle raises an
+        out-of-memory error instead of growing until Windows starts
+        spilling GPU memory into system RAM. It is read when paddle is
+        first imported, so it only applies if paddle is not imported yet.
+        """
+        import os
+        import sys
+        if gpu_mem_mb is not None:
+            if "paddle" in sys.modules:
+                import warnings
+                warnings.warn("paddle already imported; gpu_mem_mb not applied")
+            os.environ["FLAGS_gpu_memory_limit_mb"] = str(int(gpu_mem_mb))
         from paddleocr import PaddleOCR
+        limits = ({} if det_max_side is None
+                  else {"text_det_limit_type": "max", "text_det_limit_side_len": det_max_side})
         return PaddleOCR(
             lang="en",
             use_textline_orientation=True,
@@ -335,6 +368,7 @@ class RealOCRAdapter(OCRAdapter):
             text_det_thresh=0.2,
             text_det_box_thresh=0.4,
             text_det_unclip_ratio=2.0,
+            **limits,
         )
 
     def predict(self, image) -> OCRResult:

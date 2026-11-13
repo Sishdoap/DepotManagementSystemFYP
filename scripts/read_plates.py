@@ -50,6 +50,10 @@ def main():
     parser.add_argument("--events", nargs="*", type=int, default=None)
     parser.add_argument("--min-box-px", type=float, default=600)
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--det-max-side", type=int, default=1920,
+                        help="Cap on the text-detection image size; 0 = full resolution.")
+    parser.add_argument("--gpu-mem-mb", type=int, default=6144,
+                        help="Cap on PaddleOCR's GPU memory; 0 = no cap.")
     args = parser.parse_args()
 
     configs = load_camera_configs(args.config, videos_dir=args.videos_dir)
@@ -75,7 +79,9 @@ def main():
     import cv2
     from src.ocr import RealOCRAdapter
 
-    paddle = RealOCRAdapter._init_paddle(use_gpu=not args.cpu)
+    paddle = RealOCRAdapter._init_paddle(use_gpu=not args.cpu,
+                                         det_max_side=args.det_max_side or None,
+                                         gpu_mem_mb=args.gpu_mem_mb or None)
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     t0, done = time.time(), 0

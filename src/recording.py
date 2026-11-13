@@ -87,6 +87,32 @@ def in_hours(now: datetime, start_hour: int, end_hour: int) -> bool:
     return start_hour <= now.hour < end_hour
 
 
+def repair_recording(src, dst) -> int:
+    """Copy the packets of a file that was cut off into a properly closed one.
+
+    A Matroska file whose writer was killed (WSL shut down, power loss)
+    keeps every packet written so far, but has no duration and no seek
+    index, so OpenCV cannot count or seek its frames — and the pipeline
+    seeks. Remuxing (no re-encoding) writes both. Returns packets copied.
+    """
+    import av
+
+    with av.open(str(src)) as inp, av.open(str(dst), "w", format=FILE_FORMAT) as out:
+        vin = inp.streams.video[0]
+        vout = out.add_stream_from_template(vin)
+        n = 0
+        try:
+            for pkt in inp.demux(vin):
+                if pkt.dts is None or pkt.size == 0:
+                    continue
+                pkt.stream = vout
+                out.mux(pkt)
+                n += 1
+        except av.error.FFmpegError:
+            pass                                  # the cut-off tail: keep what was read
+    return n
+
+
 class RecordingLog:
     """Append-only CSV of recorder events, one file per day, shared by all cameras."""
 

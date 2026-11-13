@@ -17,7 +17,7 @@ if str(root_dir) not in sys.path:
 
 from src.recording import (
     LOG_NAME, RecordingLog, StreamRecorder, in_hours, load_stream_urls, mask_url, next_boundary,
-    recording_path,
+    recording_path, repair_recording,
 )
 
 av = pytest.importorskip("av")
@@ -137,6 +137,27 @@ def test_recorder_waits_for_keyframe_after_boundary(tmp_path):
     rec = StreamRecorder("558", str(src), tmp_path / "rec", clock=FakeClock(start, 0.05))
     rec.record_once()
     assert [s.packets for s in rec.segments] == [k2, 60 - k2]   # ... split waits for the next
+
+
+def test_repair_cut_off_recording(tmp_path):
+    import cv2
+
+    src = tmp_path / "src.avi"
+    make_video(src)
+    rec = StreamRecorder("558", str(src), tmp_path / "rec",
+                         clock=FakeClock(datetime(2026, 11, 13, 7, 0), 0.05))
+    rec.record_once()
+    good = rec.segments[0].path
+    cut = tmp_path / "cut.mkv"
+    data = good.read_bytes()
+    cut.write_bytes(data[: int(len(data) * 0.8)])       # writer killed: no index, no duration
+    fixed = tmp_path / "fixed.mkv"
+    n = repair_recording(cut, fixed)
+    assert 30 < n < 60
+    cap = cv2.VideoCapture(str(fixed))
+    assert int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) == pytest.approx(n, abs=2)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, n // 2)
+    assert cap.read()[0]
 
 
 def test_recorder_stops_when_told(tmp_path):

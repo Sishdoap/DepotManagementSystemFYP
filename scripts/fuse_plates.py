@@ -53,8 +53,10 @@ def main():
     frags = load_plate_fragments(args.fragments)
     with open(args.events) as f:
         events = [int(r["event"]) for r in csv.DictReader(f)]
-    with open(args.labels) as f:
-        labels = {int(r["event"]): r for r in csv.DictReader(f)}
+    labels = {}
+    if Path(args.labels).exists():                 # new recordings have no labels yet
+        with open(args.labels) as f:
+            labels = {int(r["event"]): r for r in csv.DictReader(f)}
     truth = {VEHICLE: {e: r.get("plate", "").replace(" ", "").upper() for e, r in labels.items()},
              TRAILER: {e: r.get("trailer_plate", "").replace(" ", "").upper() for e, r in labels.items()}}
 

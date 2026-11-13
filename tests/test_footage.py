@@ -50,6 +50,20 @@ class TestRecordingName:
         assert parse_recording_name("cam561_2026-11-13.mkv") is None
 
 
+def test_clock_offsets_file_overrides_config(tmp_path):
+    cfg = tmp_path / "cameras.yaml"
+    cfg.write_text("cameras:\n"
+                   "  558: {role: codes, lane: [[0,0],[1,0],[1,1]], clock_offset_s: [[0, 6.59], [2090, 8.43]]}\n"
+                   "  561: {role: cab, lane: [[0,0],[1,0],[1,1]], clock_offset_s: 3.16}\n")
+    videos = tmp_path / "0900"
+    videos.mkdir()
+    assert load_camera_configs(cfg, videos_dir=videos)["558"].offset_at(3000) == 8.43   # no file yet
+    (videos / "clock_offsets.yaml").write_text("558: 1.25\n")
+    configs = load_camera_configs(cfg, videos_dir=videos)
+    assert configs["558"].offset_at(3000) == 1.25
+    assert configs["561"].offset_at(0) == 3.16          # not measured: config value kept
+
+
 class TestFindRecordings:
     def test_one_file_per_camera_both_formats(self, tmp_path):
         for name in (NAME, "cam561_2026-11-13_09-00-02.mkv", "notes.txt", "cam560_x.mkv"):

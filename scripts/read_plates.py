@@ -52,7 +52,7 @@ def main():
     parser.add_argument("--cpu", action="store_true")
     args = parser.parse_args()
 
-    configs = load_camera_configs(args.config)
+    configs = load_camera_configs(args.config, videos_dir=args.videos_dir)
     videos = find_recordings(args.videos_dir)
     infos = {cam: parse_recording_name(p.name) for cam, p in videos.items()}
     ex = extract_events(load_tracks_csv(args.tracks), configs, infos)

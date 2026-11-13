@@ -345,12 +345,27 @@ class CameraConfig:
         return point_in_polygon(*det.center, self.lane)
 
 
-def load_camera_configs(path) -> dict[str, CameraConfig]:
-    """Read config/cameras.yaml into {camera id: CameraConfig}."""
+CLOCK_OFFSETS_FILE = "clock_offsets.yaml"
+
+
+def load_camera_configs(path, videos_dir=None) -> dict[str, CameraConfig]:
+    """Read config/cameras.yaml into {camera id: CameraConfig}.
+
+    The clock offsets in cameras.yaml belong to the 12 Aug recording; every
+    recording has its own (the start time in the filename and the camera's
+    burned-in clock differ by a few seconds, differently each time). If
+    `videos_dir` holds a `clock_offsets.yaml` (written by
+    scripts/measure_clock_offsets.py --write), its offsets replace the
+    configured ones: `{camera: offset}` or `{camera: [[from s, offset], ...]}`.
+    """
     import yaml
 
     with open(path) as f:
         raw = yaml.safe_load(f)
+    overrides = {}
+    if videos_dir is not None and (Path(videos_dir).expanduser() / CLOCK_OFFSETS_FILE).exists():
+        with open(Path(videos_dir).expanduser() / CLOCK_OFFSETS_FILE) as f:
+            overrides = {str(k): v for k, v in (yaml.safe_load(f) or {}).items()}
     configs = {}
     for camera, spec in (raw.get("cameras") or {}).items():
         camera = str(camera)
@@ -381,7 +396,7 @@ def load_camera_configs(path) -> dict[str, CameraConfig]:
             merge_gap_s=(float(spec["merge_gap_s"]) if spec.get("merge_gap_s") is not None
                          else None),
             opens_events=bool(spec.get("opens_events", True)),
-            clock_offsets=_parse_clock_offsets(spec.get("clock_offset_s", 0)),
+            clock_offsets=_parse_clock_offsets(overrides.get(camera, spec.get("clock_offset_s", 0))),
         )
     return configs
 

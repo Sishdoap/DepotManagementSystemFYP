@@ -14,6 +14,7 @@ Usage:
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 current_dir = Path(__file__).resolve().parent
@@ -42,6 +43,11 @@ def main():
 
     for folder in map(lambda f: Path(f).expanduser(), args.folders):
         for path in sorted(folder.glob(f"*{FILE_SUFFIX}")):
+            if time.time() - path.stat().st_mtime < 120:
+                # Still being written by the recorder: an open file has no index
+                # yet either, and moving it would break the recording.
+                print(f"skipped   {path.name} (being written)")
+                continue
             if seekable(path):
                 print(f"ok        {path.name}")
                 continue

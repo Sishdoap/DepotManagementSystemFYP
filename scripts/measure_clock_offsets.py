@@ -39,7 +39,9 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.footage import find_recordings, load_camera_configs, parse_overlay_time, parse_recording_name
+from src.footage import (
+    CLOCK_OFFSETS_FILE, find_recordings, load_camera_configs, parse_overlay_time, parse_recording_name,
+)
 
 # Overlay position in full-frame pixels (x1, y1, x2, y2); the same on every camera.
 OVERLAY_BOX = (0, 30, 1100, 200)
@@ -103,6 +105,9 @@ def main():
     parser.add_argument("--to-s", type=float, default=None,
                         help="Only measure up to this many seconds (to locate a step).")
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--write", action="store_true",
+                        help=f"Save the median offsets to <videos-dir>/{CLOCK_OFFSETS_FILE}, which "
+                             "load_camera_configs then uses instead of cameras.yaml.")
     args = parser.parse_args()
 
     os.environ.setdefault("FLAGS_use_mkldnn", "0")
@@ -116,6 +121,7 @@ def main():
     wanted = set(args.cameras) if args.cameras else {c for c, cfg in configs.items()
                                                      if cfg.role != "ignore"}
 
+    measured = {}
     for _, path in sorted(find_recordings(args.videos_dir).items()):
         info = parse_recording_name(path.name)
         if info.camera not in wanted:
@@ -144,6 +150,32 @@ def main():
             slope = statistics.linear_regression(ts, offs).slope * 3600
             print(f"  -> clock_offset_s {statistics.median(offs):+.2f} "
                   f"(range {min(offs):+.2f}..{max(offs):+.2f}, drift {slope:+.2f} s/hour)")
+            measured[info.camera] = round(statistics.median(offs), 2)
+            if max(offs) - min(offs) > 0.5:
+                print(f"  !! offsets vary by {max(offs) - min(offs):.1f} s — frames dropped? "
+                      f"A single median may be wrong; locate the step with --from-s/--to-s.")
+
+    if args.write and measured:
+        import yaml
+
+        # A camera whose overlay could not be read (bright sky behind the white
+        # digits, seen on 557/559 at midday) must not fall back to the 12 Aug
+        # offsets in cameras.yaml — those belong to a different recording and are
+        # seconds off. Our recorder stamps every file from the same PC clock, so
+        # the median of the measured cameras is the best estimate.
+        recorded = {info.camera for info in map(parse_recording_name, map(str, find_recordings(
+            args.videos_dir).values())) if info.camera in wanted}
+        missing = sorted(recorded - set(measured))
+        fill = round(statistics.median(measured.values()), 2)
+        out = Path(args.videos_dir).expanduser() / CLOCK_OFFSETS_FILE
+        with open(out, "w") as f:
+            f.write("# Measured by scripts/measure_clock_offsets.py; seconds added to the\n"
+                    "# filename start time to match each camera's burned-in clock.\n")
+            if missing:
+                f.write(f"# Not measured (overlay unreadable): {', '.join(missing)} — set to the "
+                        f"median of the measured cameras.\n")
+            yaml.safe_dump({**measured, **{c: fill for c in missing}}, f)
+        print(f"Wrote {out}" + (f" (unmeasured {', '.join(missing)} set to {fill:+.2f})" if missing else ""))
 
 
 if __name__ == "__main__":

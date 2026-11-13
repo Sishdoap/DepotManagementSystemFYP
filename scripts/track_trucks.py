@@ -109,7 +109,7 @@ def main():
                         help="Only scan the first N minutes of each video (for testing).")
     args = parser.parse_args()
 
-    configs = load_camera_configs(args.config)
+    configs = load_camera_configs(args.config, videos_dir=args.videos_dir)
     wanted = set(args.cameras) if args.cameras else {c for c, cfg in configs.items()
                                                      if cfg.role != "ignore"}
     videos = sorted(p for cam, p in find_recordings(args.videos_dir).items() if cam in wanted)

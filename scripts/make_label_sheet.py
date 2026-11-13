@@ -133,7 +133,7 @@ def main():
     out_dir = events_dir / "labels"
     (out_dir / "crops").mkdir(parents=True, exist_ok=True)
 
-    configs = load_camera_configs(args.config)
+    configs = load_camera_configs(args.config, videos_dir=args.videos_dir)
     videos = find_recordings(args.videos_dir)
     infos = {cam: parse_recording_name(p.name) for cam, p in videos.items()}
     ex = extract_events(load_tracks_csv(args.tracks), configs, infos)

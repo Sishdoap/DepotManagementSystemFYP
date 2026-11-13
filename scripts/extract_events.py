@@ -136,7 +136,7 @@ def main():
     parser.add_argument("--no-sheets", action="store_true")
     args = parser.parse_args()
 
-    configs = load_camera_configs(args.config)
+    configs = load_camera_configs(args.config, videos_dir=args.videos_dir)
     videos = find_recordings(args.videos_dir)
     infos = {cam: parse_recording_name(p.name) for cam, p in videos.items()}
     out_dir = Path(args.out_dir)

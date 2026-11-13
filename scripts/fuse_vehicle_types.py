@@ -54,8 +54,10 @@ def main():
     args = parser.parse_args()
 
     frames = load_frame_types(args.frames)
-    with open(args.labels) as f:
-        truth = {int(r["event"]): label_to_class(r["vehicle_type"]) for r in csv.DictReader(f)}
+    truth = {}
+    if Path(args.labels).exists():                 # new recordings have no labels yet
+        with open(args.labels) as f:
+            truth = {int(r["event"]): label_to_class(r["vehicle_type"]) for r in csv.DictReader(f)}
     events = sorted(set(frames) | set(truth))
     labelled = [e for e in events if truth.get(e)]
 

@@ -104,7 +104,7 @@ def main():
               "|---|---|---|---|---|---|---|"]
     for e in events:
         r = final[e]
-        mark = "" if r.vehicle_type == truth.get(e) else " ✗"
+        mark = "" if not truth.get(e) or r.vehicle_type == truth[e] else " ✗"
         lines.append(f"| {e} | {truth.get(e) or '—'} | {r.vehicle_type}{mark} | {r.conf:.2f} | "
                      f"{r.top or '—'} | {r.frames} | {'+'.join(r.cameras)} |")
 

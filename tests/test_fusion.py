@@ -10,8 +10,10 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 import pytest
+from datetime import datetime, timedelta
 
-from src.fusion import FrameRead, MultiContainerFuser, StatusWeightedVoteFuser, best_reading
+from src.fusion import (FrameRead, FusedRead, MultiContainerFuser, StatusWeightedVoteFuser,
+                        best_reading, resolve_shared_codes)
 
 A = "EMCU6461774"
 B = "OKMJ5632838"
@@ -141,3 +143,69 @@ class TestMultiContainerFuser:
 
     def test_no_primary_no_codes(self):
         assert self.fuser.fuse(frames(B, 1, status="inferred")).codes == ()
+
+    def test_second_code_read_as_40ft_is_rejected(self):
+        # 13 Nov 11:00, event 10: the 45G1 container of the truck ahead was
+        # read on 11 side-camera frames of a 22G1 truck.
+        reads = frames(A, 30, size_type="22G1") + frames(C, 11, size_type="45G1", start=100)
+        out = self.fuser.fuse(reads)
+        assert out.codes == (A,)
+        assert f"not a second container: {C} reads as 45G1" in out.note
+
+    def test_second_code_read_as_20ft_is_kept(self):
+        reads = frames(A, 30, size_type="22G1") + frames(C, 8, size_type="22G1", start=100)
+        assert self.fuser.fuse(reads).codes == (A, C)
+
+
+class TestResolveSharedCodes:
+    """A container listed by trucks close in time goes to one of them."""
+
+    T0 = datetime(2026, 11, 13, 11, 39, 2)
+
+    def fused(self, code, *extra, score=None):
+        scores = {code: 30.0}
+        scores.update(score or {})
+        return FusedRead(code, "verified", support=10, scores=scores, codes=(code, *extra))
+
+    def times(self, *offsets_s):
+        return {i + 1: self.T0 + timedelta(seconds=s) for i, s in enumerate(offsets_s)}
+
+    def test_second_container_owned_by_neighbour_is_dropped(self):
+        # Event 9 (TXGU...) and event 10, 15 s later, listing it as second container.
+        out = {1: self.fused(C), 2: self.fused(A, C, score={C: 33.0})}
+        resolve_shared_codes(out, self.times(0, 15))
+        assert out[1].codes == (C,)
+        assert out[2].codes == (A,)
+        assert f"dropped second container {C} (main code of event 1)" in out[2].note
+
+    def test_far_apart_trucks_keep_their_codes(self):
+        # In at the gate, out an hour later: the same container on two trucks is fine.
+        out = {1: self.fused(C), 2: self.fused(A, C)}
+        resolve_shared_codes(out, self.times(0, 3600))
+        assert out[2].codes == (A, C)
+
+    def test_second_container_on_two_trucks_goes_to_higher_score(self):
+        out = {1: self.fused(A, C, score={C: 24.0}), 2: self.fused(B, C, score={C: 9.0})}
+        resolve_shared_codes(out, self.times(0, 20))
+        assert out[1].codes == (A, C)
+        assert out[2].codes == (B,)
+        assert "more support on event 1" in out[2].note
+
+    def test_tie_drops_from_both(self):
+        out = {1: self.fused(A, C, score={C: 12.0}), 2: self.fused(B, C, score={C: 12.0})}
+        resolve_shared_codes(out, self.times(0, 20))
+        assert out[1].codes == (A,) and out[2].codes == (B,)
+
+    def test_same_main_code_is_flagged_not_changed(self):
+        out = {1: self.fused(C), 2: self.fused(C), 3: self.fused(A, C)}
+        resolve_shared_codes(out, self.times(0, 30, 60))
+        assert out[1].codes == (C,) and out[2].codes == (C,)
+        assert f"{C} is also the code of event 2" in out[1].note
+        assert out[3].codes == (A,)
+
+    def test_window_counts_only_trucks_listing_the_code(self):
+        # Trucks 1 and 3 both list C but are 300 s apart; truck 2 between them
+        # does not list it, so it does not link them.
+        out = {1: self.fused(C), 2: self.fused(B), 3: self.fused(A, C, score={C: 20.0})}
+        resolve_shared_codes(out, self.times(0, 150, 300))
+        assert out[3].codes == (A, C)

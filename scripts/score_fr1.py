@@ -21,8 +21,10 @@ Per-camera rows count only the trucks that camera saw ("seen" column);
 cross-camera "all" covers every event. Containers and no-container
 vehicles are counted separately: for a vehicle without a container the
 only right answer is no code. Labels may hold two codes (2x20 ft); fused
-rows use src.fusion.MultiContainerFuser, and a second table compares it
-with the single-code StatusWeightedVoteFuser on all cameras.
+rows use src.fusion.MultiContainerFuser followed by
+src.fusion.resolve_shared_codes (a container goes to one of the trucks
+close in time), and a second table compares the multi-container fuser
+alone with the single-code StatusWeightedVoteFuser on all cameras.
 
 Outputs (results/ is gitignored):
     results/events/fr1_results.md          the table, plus per-event detail
@@ -36,6 +38,7 @@ import argparse
 import csv
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 current_dir = Path(__file__).resolve().parent
@@ -44,7 +47,8 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.fusion import MultiContainerFuser, StatusWeightedVoteFuser, load_frame_reads
+from src.fusion import (MultiContainerFuser, StatusWeightedVoteFuser, load_frame_reads,
+                        resolve_shared_codes)
 from src.iso6346_recovery import FAILED
 from src.ocr_eval import LEVELS, Tally, best_at_level
 
@@ -64,7 +68,11 @@ def main():
     parser.add_argument("--reads", default="results/events/reads.csv")
     parser.add_argument("--labels", default="results/events/labels/labels.csv")
     parser.add_argument("--out-dir", default="results/events")
+    parser.add_argument("--events", default="results/events/events.csv",
+                        help="Event entry times, for src.fusion.resolve_shared_codes.")
     args = parser.parse_args()
+    with open(args.events) as f:
+        times = {int(r["event"]): datetime.fromisoformat(r["entry_time"]) for r in csv.DictReader(f)}
 
     with open(args.labels) as f:
         labels = {int(r["event"]): r for r in csv.DictReader(f) if r["checked"] == "yes"}
@@ -104,11 +112,14 @@ def main():
         # fused, per scope
         for name, cams in scopes.items():
             tally, st_ok, st_n = Tally(), 0, 0
+            per_event = {}
             for ev in sorted(truth):
                 fr = [best_at_level(reads, level) for cam in cams for reads in frames.get((ev, cam), [])]
                 if not fr and name != "all cameras":
                     continue                       # this camera never saw the truck
-                fused = fuser.fuse(fr)
+                per_event[ev] = fuser.fuse(fr)
+            resolve_shared_codes(per_event, times)
+            for ev, fused in per_event.items():
                 o = tally.add_vehicle(fused.codes, truth[ev])
                 if truth_st[ev]:
                     st_n += 1

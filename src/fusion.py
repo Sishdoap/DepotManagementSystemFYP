@@ -33,6 +33,10 @@ Two steps:
 
 Bobtails and box lorries carry no container; for them the right answer is
 no code, which the support rule is there to protect.
+
+`MultiContainerFuser` adds a second code on a 2x20 ft truck, and
+`resolve_shared_codes` then runs across all trucks so that a container
+caught from a neighbouring truck is not counted on two at once.
 """
 
 from __future__ import annotations
@@ -181,9 +185,18 @@ class MultiContainerFuser(ReadFuser):
         CRSU1138578), a real second container on many (8 and 25);
       - the voted size/type is a 20 ft code (first character "2") — a
         40/45 ft container leaves no room for another on the chassis;
+      - the second code's *own* size/type, voted over the frames that
+        read it, is not a 40/45 ft code either (13 Nov 11:00, event 10:
+        the side cameras caught the 45G1 container of the truck 15 s
+        ahead, TXGU4947095, on 11 frames, and it was added to a 22G1
+        truck). A second code whose size was never read is still allowed;
       - at most `max_codes` codes in total (two 20 ft boxes per chassis).
     The threshold of 4 sits between those observations; with only two
     real examples it is a heuristic to re-check on more footage.
+
+    Fusion sees one truck at a time; a container that leaks in from a
+    neighbouring truck with the same size is only caught across trucks,
+    by `resolve_shared_codes`.
     """
 
     def __init__(self, base: Optional[ReadFuser] = None, min_extra_support: int = 4,
@@ -199,13 +212,97 @@ class MultiContainerFuser(ReadFuser):
         validated = Counter(r.code for r in reads
                             if r.code and r.code != out.code
                             and STATUS_RANK[r.status] >= STATUS_RANK[RECOVERED])
-        extra = [c for c, n in sorted(validated.items(), key=lambda kv: (-kv[1], kv[0]))
-                 if n >= self.min_extra_support][: self.max_codes - 1]
+        candidates = [c for c, n in sorted(validated.items(), key=lambda kv: (-kv[1], kv[0]))
+                      if n >= self.min_extra_support]
+        notes, extra = [], []
+        for c in candidates:
+            own_size, _ = _vote_size_type([r for r in reads if r.code == c])
+            if own_size and not own_size.startswith("2"):
+                notes.append(f"not a second container: {c} reads as {own_size}")
+            elif len(extra) < self.max_codes - 1:
+                extra.append(c)
         if extra:
             out.codes = (out.code, *extra)
-            note = f"second container: {', '.join(f'{c} ({validated[c]} frames)' for c in extra)}"
-            out.note = f"{note}; {out.note}" if out.note else note
+            notes.insert(0, "second container: "
+                         + ", ".join(f"{c} ({validated[c]} frames)" for c in extra))
+        if notes:
+            out.note = "; ".join(notes + ([out.note] if out.note else []))
         return out
+
+
+def resolve_shared_codes(fused: Mapping[int, FusedRead], times: Mapping[int, "datetime"],
+                         window_s: float = 180.0) -> None:
+    """Give each container to one truck when trucks close in time share it (in place).
+
+    A container is on one truck at a time. When trucks pass seconds apart,
+    a side camera can catch the neighbour's container and attach it to
+    the wrong event as a second container (13 Nov 11:00: event 10 listed
+    event 9's TXGU4947095). Fusion sees one truck at a time, so this runs
+    over all fused events afterwards.
+
+    For every code listed by two or more events whose entry times are
+    within `window_s`:
+      - if exactly one of them has it as its main code, it is removed from
+        the others' second containers;
+      - if it is only a second container, the event with the higher vote
+        score for it keeps it; on a tie, none does;
+      - if several have it as the main code (the same truck split in two,
+        or a real misassignment) those main codes stay, each with a note
+        naming the other events for a person to check; it is still
+        removed from any other event's second containers.
+    The window keeps a container that legitimately passes twice — in at
+    the gate, out hours later — on both trucks.
+    """
+    from datetime import timedelta
+
+    window = timedelta(seconds=window_s)
+    holders: dict[str, list[int]] = defaultdict(list)
+    for ev, out in fused.items():
+        for c in out.codes:
+            holders[c].append(ev)
+
+    def drop(ev: int, code: str, why: str) -> None:
+        out = fused[ev]
+        out.codes = tuple(c for c in out.codes if c != code)
+        note = f"dropped second container {code} ({why})"
+        out.note = f"{note}; {out.note}" if out.note else note
+
+    for code, evs in sorted(holders.items()):
+        for group in _close_groups(sorted(evs, key=lambda e: times[e]), times, window):
+            if len(group) < 2:
+                continue
+            owners = [e for e in group if fused[e].code == code]
+            if len(owners) == 1:
+                for e in group:
+                    if e != owners[0]:
+                        drop(e, code, f"main code of event {owners[0]}")
+            elif not owners:
+                best = max(fused[e].scores.get(code, 0.0) for e in group)
+                keep = [e for e in group if fused[e].scores.get(code, 0.0) == best]
+                for e in group:
+                    if len(keep) > 1 or e != keep[0]:
+                        why = (f"tie with events {', '.join(map(str, keep))}" if len(keep) > 1
+                               else f"more support on event {keep[0]}")
+                        drop(e, code, why)
+            else:
+                for e in group:
+                    if e not in owners:
+                        drop(e, code, f"main code of events {', '.join(map(str, owners))}")
+                for e in owners:
+                    others = ", ".join(str(o) for o in owners if o != e)
+                    note = f"{code} is also the code of event {others}"
+                    fused[e].note = f"{note}; {fused[e].note}" if fused[e].note else note
+
+
+def _close_groups(evs: Sequence[int], times: Mapping[int, "datetime"], window) -> list[list[int]]:
+    """Split time-sorted events into runs whose consecutive gaps are within `window`."""
+    groups: list[list[int]] = []
+    for e in evs:
+        if groups and times[e] - times[groups[-1][-1]] <= window:
+            groups[-1].append(e)
+        else:
+            groups.append([e])
+    return groups
 
 
 def _vote_size_type(reads: Sequence[FrameRead]) -> tuple[Optional[str], int]:

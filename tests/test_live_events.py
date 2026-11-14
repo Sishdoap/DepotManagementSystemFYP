@@ -97,6 +97,28 @@ def test_slowest_camera_sets_now():
     assert live.now() == datetime(2026, 11, 13, 9, 0, 40)
 
 
+def test_stalled_camera_is_left_out_of_now():
+    live = LiveEventAssembler(CONFIGS, RECS)
+    live.add_frame("561", 100.0, [])
+    live.add_frame("558", 40.0, [])
+    live.set_stalled("558", True)
+    assert live.now() == datetime(2026, 11, 13, 9, 1, 40)
+    live.set_stalled("558", False)
+    assert live.now() == datetime(2026, 11, 13, 9, 0, 40)
+
+
+def test_update_hands_over_kept_detections():
+    live = LiveEventAssembler(CONFIGS, RECS)
+    for cam, dets in {"561": track("561", 1, 0, 10), "558": track("558", 7, 5, 20)}.items():
+        for d in dets:
+            live.add_frame(cam, d.t, [d])
+    for cam in CONFIGS:
+        live.add_frame(cam, 30.0, [])
+    up = live.update()
+    assert set(up.detections) == {("561", 1), ("558", 7)}
+    assert len(up.detections[("558", 7)]) == len(track("558", 7, 5, 20))
+
+
 def test_event_id_is_stable():
     e = extract_events(two_trucks(), CONFIGS, RECS).events[0]
     assert event_id(e) == "20261113-090010_561_1"

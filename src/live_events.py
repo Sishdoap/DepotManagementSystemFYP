@@ -19,7 +19,10 @@ algorithm: replaying a recording through it gives exactly the batch events
   tolerance). On the footage that is ~45-60 s after the truck leaves the
   last camera. Final events are reported once and never change.
 - "Now" is the *slowest* camera's wall-clock time, so a camera that lags
-  (network) cannot have its passes cut off.
+  (network) cannot have its passes cut off. A camera whose stream has
+  stopped (`set_stalled`) is left out, or one dead stream would hold every
+  event provisional; its passes are then missing from events finalised
+  meanwhile.
 - Memory stays bounded: tracks of final events older than `keep_s` are
   dropped. The re-run then no longer sees them; that cannot change any
   later event, because nothing can join an event that old.
@@ -49,6 +52,9 @@ class LiveUpdate:
     provisional: list[Event] = field(default_factory=list)   # may still change
     finalized: list[Event] = field(default_factory=list)     # final since the last update
     now: Optional[datetime] = None
+    # (camera, track id) -> the track's detections kept by the lane/size rules,
+    # for the events above (what OCR and the type classifier read)
+    detections: dict = field(default_factory=dict)
 
 
 class LiveEventAssembler:
@@ -71,6 +77,7 @@ class LiveEventAssembler:
         self.latest_t: dict[str, float] = {}           # camera -> video seconds of its latest frame
         self.final_ids: set[str] = set()
         self.final_events: list[Event] = []
+        self.stalled: set[str] = set()
 
     # -- input -----------------------------------------------------------------
     def add_frame(self, camera: str, t: float, detections: list[Detection]):
@@ -86,9 +93,14 @@ class LiveEventAssembler:
     def wall(self, camera: str, t: float) -> datetime:
         return wall_clock(self.recordings[camera], t, self.configs[camera].offset_at(t))
 
+    def set_stalled(self, camera: str, stalled: bool) -> None:
+        """Mark a camera whose stream stopped delivering (left out of `now`)."""
+        (self.stalled.add if stalled else self.stalled.discard)(camera)
+
     def now(self) -> Optional[datetime]:
         """Wall-clock time every camera has reached (the slowest camera)."""
-        cams = [c for c in self.configs if self.configs[c].role != "ignore" and c in self.recordings]
+        cams = [c for c in self.configs if self.configs[c].role != "ignore" and c in self.recordings
+                and c not in self.stalled]
         if not cams or any(c not in self.latest_t for c in cams):
             return None
         return min(self.wall(c, self.latest_t[c]) for c in cams)
@@ -115,7 +127,8 @@ class LiveEventAssembler:
         """Re-assemble; `final_all` finalises everything (end of a replay)."""
         now = self.now()
         tracks = self.tracks_snapshot() if final_all else self.ended_tracks()
-        events = extract_events(tracks, self.configs, self.recordings, **self.assembly_kwargs).events
+        ex = extract_events(tracks, self.configs, self.recordings, **self.assembly_kwargs)
+        events = ex.events
         result = LiveUpdate(now=now)
         active_starts = [] if final_all else self.active_track_starts()
         tol = timedelta(seconds=self.assembly_kwargs["clock_tolerance_s"])
@@ -136,6 +149,9 @@ class LiveEventAssembler:
                 result.finalized.append(e)
             else:
                 result.provisional.append(e)
+        for e in result.finalized + result.provisional:
+            for p in e.passes:
+                result.detections[(p.camera, p.track_id)] = ex.detections.get((p.camera, p.track_id), [])
         if now is not None and not final_all:
             self._forget_before(now - timedelta(seconds=self.keep_s))
         return result

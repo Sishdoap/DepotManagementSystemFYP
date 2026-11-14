@@ -291,6 +291,8 @@ def resolve_shared_codes(fused: Mapping[int, FusedRead], times: Mapping[int, "da
                 for e in owners:
                     others = ", ".join(str(o) for o in owners if o != e)
                     note = f"{code} is also the code of event {others}"
+                    if note in fused[e].note:      # live mode re-runs this as trucks arrive
+                        continue
                     fused[e].note = f"{note}; {fused[e].note}" if fused[e].note else note
 
 

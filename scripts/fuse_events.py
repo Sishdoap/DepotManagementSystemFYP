@@ -38,8 +38,8 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.fusion import (FrameRead, MultiContainerFuser, best_reading, load_frame_reads,
-                        resolve_shared_codes)
+from src.fusion import (FrameRead, MultiContainerFuser, StatusWeightedVoteFuser, best_reading,
+                        load_frame_reads, resolve_shared_codes)
 from src.iso6346_recovery import STATUS_RANK, RECOVERED
 
 ROTATIONS = (0, 90, 180, 270)
@@ -65,9 +65,12 @@ def main():
     parser.add_argument("--reads", default="results/events/reads.csv")
     parser.add_argument("--events", default="results/events/events.csv")
     parser.add_argument("--out", default="results/events/fused.csv")
+    parser.add_argument("--min-support", type=int, default=None,
+                        help="Frames a code needs whatever its status (default: the fuser's).")
     args = parser.parse_args()
 
-    fuser = MultiContainerFuser()
+    fuser = (MultiContainerFuser() if args.min_support is None else
+             MultiContainerFuser(StatusWeightedVoteFuser(min_support=args.min_support)))
     by_frame = load_frame_reads(args.reads)
     cameras = sorted({cam for _, cam, _ in by_frame})
     with open(args.events) as f:

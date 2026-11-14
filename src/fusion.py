@@ -19,7 +19,15 @@ Two steps:
 `StatusWeightedVoteFuser` (the default):
     - each frame votes for its code with a weight by status
       (verified 3, recovered 2, inferred 1); failed frames don't vote;
-    - a code that was only ever *inferred* must be read on at least
+    - every code must be read on at least `min_support` frames (default 2),
+      whatever its status. A single verified or recovered frame used to be
+      enough; on 13 Nov 11:00 the only three such codes (BICU1202510,
+      ZZEZ2010810, RRHU1750100 — check digit passed by chance) were all on
+      vehicles without a container (a bare chassis, two prime movers
+      without a trailer). On the 12 Aug hour (development set) the
+      all-camera result is unchanged at 2 (10/10, no false code); single
+      cameras lose two correct single-frame reads and one wrong one;
+    - a code that was only ever *inferred* must also reach
       `min_inferred_support` frames (default 2) — an inferred code is
       unverified, and a single one is as likely to be stray text as a real
       code;
@@ -129,9 +137,10 @@ class StatusWeightedVoteFuser(ReadFuser):
     """Status-weighted vote; inferred-only codes need several frames (module docstring)."""
 
     def __init__(self, weights: Optional[Mapping[str, float]] = None,
-                 min_inferred_support: int = 2):
+                 min_inferred_support: int = 2, min_support: int = 2):
         self.weights = dict(weights or DEFAULT_WEIGHTS)
         self.min_inferred_support = min_inferred_support
+        self.min_support = min_support
 
     def fuse(self, reads: Sequence[FrameRead]) -> FusedRead:
         score: dict[str, float] = defaultdict(float)
@@ -151,18 +160,24 @@ class StatusWeightedVoteFuser(ReadFuser):
         base = dict(frames=len(reads), size_type=size_type, size_type_support=size_support,
                     scores=dict(sorted(score.items(), key=lambda kv: (-kv[1], kv[0]))))
 
-        eligible = [c for c in score
-                    if strongest[c] != INFERRED or support[c] >= self.min_inferred_support]
+        eligible = [c for c in score if support[c] >= self.min_support
+                    and (strongest[c] != INFERRED or support[c] >= self.min_inferred_support)]
         if not eligible:
             note = ""
             if score:
                 top = max(score, key=lambda c: (score[c], c))
-                note = f"rejected: {top} inferred on {support[top]} frame(s)"
+                note = f"rejected: {top} {strongest[top]} on {support[top]} frame(s)"
             return FusedRead(None, FAILED, note=note, **base)
 
         ranked = sorted(eligible, key=lambda c: (-score[c], c))
-        if len(ranked) > 1 and score[ranked[0]] == score[ranked[1]]:
-            return FusedRead(None, FAILED, note=f"tie: {ranked[0]} vs {ranked[1]}", **base)
+        # A tie gives no code - counting codes too weak to be reported
+        # themselves: a rejected rival with as much evidence still means the
+        # reads disagree (13 Nov 11:00 event 16, a prime mover without a
+        # container: GMVJ6224557 inferred on 2 frames vs WTHU0470422 recovered
+        # on 1, score 2 each).
+        rival = max((c for c in score if c != ranked[0]), key=lambda c: (score[c], c), default=None)
+        if rival is not None and score[rival] >= score[ranked[0]]:
+            return FusedRead(None, FAILED, note=f"tie: {ranked[0]} vs {rival}", **base)
         winner = ranked[0]
         note = f"also read: {', '.join(ranked[1:])}" if len(ranked) > 1 else ""
         return FusedRead(winner, strongest[winner], support=support[winner],

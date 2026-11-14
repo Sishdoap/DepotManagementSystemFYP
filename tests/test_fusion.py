@@ -46,9 +46,15 @@ class TestBestReading:
 class TestVoteFuser:
     fuser = StatusWeightedVoteFuser()
 
-    def test_single_verified_frame_is_enough(self):
+    def test_single_verified_frame_is_not_enough(self):
+        # 13 Nov 11:00: three single-frame codes (one verified, one recovered)
+        # on a bare chassis and two prime movers without a trailer.
         out = self.fuser.fuse([fr("verified", A), fr("failed", frame=1)])
-        assert (out.code, out.status, out.support, out.frames) == (A, "verified", 1, 2)
+        assert out.code is None and out.note == f"rejected: {A} verified on 1 frame(s)"
+
+    def test_two_verified_frames_give_a_code(self):
+        out = self.fuser.fuse([fr("verified", A), fr("recovered", A, frame=1), fr("failed", frame=2)])
+        assert (out.code, out.status, out.support, out.frames) == (A, "verified", 2, 3)
 
     def test_lone_inferred_code_rejected(self):
         # The OKMJ5632838 case: stray text inferred on one frame must not become a code.
@@ -65,9 +71,10 @@ class TestVoteFuser:
         assert out.status == "recovered"
 
     def test_weights_favour_validated_reads(self):
-        # 1 verified (3) beats 2 inferred (2).
-        out = self.fuser.fuse([fr("verified", A, frame=0),
-                               fr("inferred", B, frame=1), fr("inferred", B, frame=2)])
+        # 2 verified (6) beat 3 inferred (3).
+        out = self.fuser.fuse([fr("verified", A, frame=0), fr("verified", A, frame=3),
+                               fr("inferred", B, frame=1), fr("inferred", B, frame=2),
+                               fr("inferred", B, frame=4)])
         assert out.code == A and "also read: OKMJ5632838" in out.note
 
     def test_many_inferred_outvote_one_verified(self):
@@ -76,7 +83,8 @@ class TestVoteFuser:
         assert out.code == B and out.status == "inferred"
 
     def test_tie_gives_no_code(self):
-        out = self.fuser.fuse([fr("verified", A, frame=0), fr("verified", B, frame=1)])
+        out = self.fuser.fuse([fr("verified", A, frame=0), fr("verified", B, frame=1),
+                               fr("verified", A, frame=2), fr("verified", B, frame=3)])
         assert out.code is None and out.note.startswith("tie")
 
     def test_cross_camera_support(self):
@@ -86,8 +94,10 @@ class TestVoteFuser:
     def test_size_type_voted_separately(self):
         out = self.fuser.fuse([fr("failed", frame=0, size_type="22G1"),
                                fr("failed", frame=1, size_type="22G1"),
-                               fr("verified", A, frame=2, size_type="45G1")])
-        assert (out.code, out.size_type, out.size_type_support) == (A, "22G1", 2)
+                               fr("failed", frame=4, size_type="22G1"),
+                               fr("verified", A, frame=2, size_type="45G1"),
+                               fr("verified", A, frame=3, size_type="45G1")])
+        assert (out.code, out.size_type, out.size_type_support) == (A, "22G1", 3)
 
     def test_size_type_tie_is_none(self):
         out = self.fuser.fuse([fr("failed", size_type="22G1"), fr("failed", frame=1, size_type="45G1")])
@@ -98,11 +108,14 @@ class TestVoteFuser:
         assert out.code is None and out.status == "failed" and out.frames == 0
 
     def test_configurable_support(self):
-        lenient = StatusWeightedVoteFuser(min_inferred_support=1)
+        lenient = StatusWeightedVoteFuser(min_inferred_support=1, min_support=1)
         assert lenient.fuse([fr("inferred", B)]).code == B
+        assert StatusWeightedVoteFuser(min_support=1).fuse([fr("verified", A)]).code == A
+        assert StatusWeightedVoteFuser(min_support=3).fuse(
+            [fr("verified", A), fr("verified", A, frame=1)]).code is None
 
     def test_single_fuser_codes_tuple(self):
-        assert self.fuser.fuse([fr("verified", A)]).codes == (A,)
+        assert self.fuser.fuse([fr("verified", A), fr("verified", A, frame=1)]).codes == (A,)
         assert self.fuser.fuse([]).codes == ()
 
 
@@ -209,3 +222,16 @@ class TestResolveSharedCodes:
         out = {1: self.fused(C), 2: self.fused(B), 3: self.fused(A, C, score={C: 20.0})}
         resolve_shared_codes(out, self.times(0, 150, 300))
         assert out[3].codes == (A, C)
+
+
+def test_rejected_rival_with_equal_score_still_ties():
+    # 13 Nov 11:00 event 16: inferred on 2 frames (score 2) vs recovered on 1 (score 2).
+    out = StatusWeightedVoteFuser().fuse([fr("inferred", B, frame=0), fr("inferred", B, frame=1),
+                                          fr("recovered", A, frame=2)])
+    assert out.code is None and out.note == f"tie: {B} vs {A}"
+
+
+def test_weaker_rejected_rival_does_not_block():
+    out = StatusWeightedVoteFuser().fuse([fr("verified", A, frame=0), fr("verified", A, frame=1),
+                                          fr("verified", B, frame=2)])
+    assert out.code == A

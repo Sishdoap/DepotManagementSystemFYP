@@ -70,6 +70,8 @@ def main():
     parser.add_argument("--out-dir", default="results/events")
     parser.add_argument("--events", default="results/events/events.csv",
                         help="Event entry times, for src.fusion.resolve_shared_codes.")
+    parser.add_argument("--min-support", type=int, default=None,
+                        help="Frames a code needs whatever its status (default: the fuser's).")
     args = parser.parse_args()
     with open(args.events) as f:
         times = {int(r["event"]): datetime.fromisoformat(r["entry_time"]) for r in csv.DictReader(f)}
@@ -90,8 +92,10 @@ def main():
     scopes.update({k: v for k, v in SCOPES.items() if all(c in cameras for c in v)})
     scopes["all cameras"] = tuple(cameras)
 
-    fuser = MultiContainerFuser()
-    single = StatusWeightedVoteFuser()
+    fuser = (MultiContainerFuser() if args.min_support is None else
+             MultiContainerFuser(StatusWeightedVoteFuser(min_support=args.min_support)))
+    single = (StatusWeightedVoteFuser() if args.min_support is None else
+              StatusWeightedVoteFuser(min_support=args.min_support))
     table, predictions, comparison = [], [], []
     for level in LEVELS:
         # per frame + one frame, per camera

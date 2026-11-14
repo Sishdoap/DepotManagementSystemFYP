@@ -32,13 +32,19 @@ class TestNormalise:
         assert normalise_plate("8QB7404") == ("BQB7404", VEHICLE)      # 8 in letters
 
     def test_fewest_fixes_wins(self):
-        assert normalise_plate("SG328") == ("SG328", VEHICLE)          # not S6328
+        assert normalise_plate("SG3281") == ("SG3281", VEHICLE)        # not S63281
 
     def test_rejects_non_plates(self):
         assert normalise_plate("INF403") is None        # I is not used on plates
         assert normalise_plate("KENDERAAN") is None
         assert normalise_plate("22G1") is None
         assert normalise_plate("7080") is None
+
+    def test_fleet_numbers_are_not_vehicle_plates(self):
+        # cab fleet numbers: 3 digits (12 Aug, 13 Nov); vehicle plates there all have 4
+        for fleet in ("SG328", "XPS310", "SXS332", "SXS 375"):
+            assert normalise_plate(fleet) is None
+        assert normalise_plate("T/BD525") == ("T/BD525", TRAILER)     # trailer plates keep 3
 
     def test_short_words_rejected(self):
         assert normalise_plate("CUBE") is None          # would be CU8E with one fix

@@ -24,7 +24,8 @@ classifier share one CUDA context in the main process.
 With --replay <hour folder> the same pipeline runs over a finished hour
 as fast as the machine allows (demo fallback, and the check against the
 batch results). Live, it starts at the beginning of the file being
-written now and catches up (decoding runs ~4x faster than real time).
+written now, ~30 s before the present (--from-hour-start: from the
+beginning of that file, catching up at ~3.4x real time).
 
 Clock offsets: live recordings are stamped with the PC clock, measured
 within 1 s of the camera overlay (13 Nov), so live mode uses zero offsets
@@ -64,6 +65,10 @@ DONE = object()
 def ocr_worker(jobs, results, roles, frames_per_camera, det_max_side, gpu_mem_mb, use_gpu):
     """OCR process: read each final event's crops, send the reads back."""
     import os
+    # Ctrl-C / SIGTERM reach the whole process group; the main process ends
+    # this one by sending None after the last job.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     sys.path.insert(0, str(root_dir))
     from src.live_ocr import EventReads, PaddleTextReader, read_event
     reader = PaddleTextReader(use_gpu=use_gpu, det_max_side=det_max_side, gpu_mem_mb=gpu_mem_mb)
@@ -123,6 +128,8 @@ def main():
     parser.add_argument("--cpu-ocr", action="store_true")
     parser.add_argument("--update-every-s", type=float, default=5.0)
     parser.add_argument("--status-every-s", type=float, default=60.0)
+    parser.add_argument("--from-hour-start", action="store_true",
+                        help="Live: read the current hour from its start (default: from ~30 s ago).")
     parser.add_argument("--max-minutes", type=float, default=None,
                         help="Replay: stop after this many minutes of video (testing).")
     args = parser.parse_args()
@@ -174,8 +181,13 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     followers, queues, threads = {}, {}, []
     for cam in cameras:
+        skip = 0.0
+        if not replay and not args.from_hour_start:
+            current = camera_files(args.root, cam)
+            if current:
+                skip = max(0.0, (datetime.now() - current[-1][0].started_at).total_seconds() - 30)
         f = CameraFollower(args.root, cam, live=not replay, sample_every=args.sample_every,
-                           files=[files[cam]] if replay else None)
+                           files=[files[cam]] if replay else None, skip_s=skip)
         followers[cam], queues[cam] = f, queue.Queue(maxsize=4)
         th = threading.Thread(target=decode, args=(f, queues[cam], stop), daemon=True)
         th.start()

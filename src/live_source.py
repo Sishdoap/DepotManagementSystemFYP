@@ -27,6 +27,10 @@ a recorded hour can stand in for the live streams (demo fallback, tests).
 
 When a camera stops delivering (stream down), `stalled` turns true after
 `stall_s` without new data, so the caller can stop waiting for that camera.
+
+`skip_s` starts the first file that many seconds in (at the next keyframe,
+packets before it are not decoded): live mode starts near "now" instead of
+first catching up on the hour so far.
 """
 
 from __future__ import annotations
@@ -114,8 +118,9 @@ class CameraFollower:
     def __init__(self, root, camera: str, *, live: bool = True, sample_every: int = 5,
                  fps: float = 20.0, start_after: Optional[datetime] = None,
                  files: Optional[list[Path]] = None, poll_s: float = 0.5, stall_s: float = 30.0,
-                 decode_threads: int = 4):
+                 decode_threads: int = 4, skip_s: float = 0.0):
         self.root, self.camera, self.live = Path(root), camera, live
+        self.skip_s = skip_s
         self.sample_every, self.fps = sample_every, fps
         self.start_after = start_after
         self.files = files
@@ -171,6 +176,7 @@ class CameraFollower:
         info, path = first
         self.reference = info
         running = 0
+        skip_s = self.skip_s                     # first file only
         while not self._stopped:
             finished = (lambda: True) if not self.live else (lambda i=info: self._newer_exists(i))
             gf = GrowingFile(path, finished, poll_s=self.poll_s, on_wait=self._on_wait)
@@ -185,6 +191,16 @@ class CameraFollower:
                     for packet in c.demux(stream):
                         if self._stopped:
                             break
+                        if skip_s > 0:
+                            # Jump in without decoding: start at the first keyframe
+                            # at or after skip_s, numbering frames by their time.
+                            ts = packet.pts if packet.pts is not None else packet.dts
+                            t_pkt = float(ts * stream.time_base) if ts is not None else 0.0
+                            if t_pkt < skip_s or not packet.is_keyframe:
+                                continue
+                            idx = round(t_pkt * self.fps)
+                            running += idx
+                            skip_s = 0.0
                         for frame in packet.decode():
                             self.stalled = False
                             if idx % self.sample_every == 0:

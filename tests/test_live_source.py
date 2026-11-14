@@ -159,3 +159,17 @@ def test_stalled_after_no_data(tmp_path):
     f.stop()
     t.join(timeout=5)
     assert not t.is_alive()
+
+
+def test_skip_starts_at_a_keyframe_without_decoding_before(tmp_path):
+    (a,) = names(tmp_path, 11)
+    make_mkv(a, n_frames=40)
+    with av.open(str(a)) as c:
+        s = c.streams.video[0]
+        keys = [float(p.pts * s.time_base) for p in c.demux(s) if p.size and p.is_keyframe]
+    first_key = min(k for k in keys if k >= 0.6)
+    f = CameraFollower(tmp_path, "557", live=False, sample_every=5, skip_s=0.6)
+    got = list(f.frames())
+    start = round(first_key * 20)
+    assert got[0].frame == next(i for i in range(start, 40) if i % 5 == 0)   # sampled frames only
+    assert [s.t for s in got] == [i / 20 for i in range(start, 40) if i % 5 == 0]

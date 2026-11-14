@@ -32,7 +32,14 @@ within 1 s of the camera overlay (13 Nov), so live mode uses zero offsets
 unless --offsets-from points at an hour folder with a measured
 clock_offsets.yaml. --replay uses that hour's clock_offsets.yaml when present.
 
-The database file (default depot_live.db) holds plates and stays out of git.
+For the dashboard (scripts/depot_dashboard.py) it also writes, under
+--live-dir: a preview of each camera about once a second with the tracked
+boxes, a thumbnail per camera of every finished truck, and a status file.
+`--replay <hour> --speed 1` plays a recorded hour at real-time pace — the
+demo fallback when the streams are down.
+
+The database file (default depot_passes.db; not depot_live.db, which the
+gate simulator wipes) holds plates and stays out of git.
 
 Usage:
     python scripts/run_live.py                                   # live
@@ -115,7 +122,14 @@ def main():
     parser.add_argument("--config", default="config/cameras.yaml")
     parser.add_argument("--offsets-from", default=None,
                         help="Hour folder whose clock_offsets.yaml to use in live mode.")
-    parser.add_argument("--db", default="sqlite:///depot_live.db")
+    parser.add_argument("--db", default="sqlite:///depot_passes.db",
+                        help="Not depot_live.db: the gate simulator wipes that file on start.")
+    parser.add_argument("--live-dir", default="frames/live",
+                        help="Camera previews, pass thumbnails and status for the dashboard.")
+    parser.add_argument("--preview-every-s", type=float, default=1.0)
+    parser.add_argument("--speed", type=float, default=0.0,
+                        help="Replay: play at this multiple of real time (1 = as live, for the "
+                             "demo); 0 = as fast as possible.")
     parser.add_argument("--spool", default=str(Path.home() / "depot_live_spool"))
     parser.add_argument("--model", default="models/yolov8n.pt")
     parser.add_argument("--imgsz", type=int, default=1280)
@@ -134,6 +148,8 @@ def main():
                         help="Replay: stop after this many minutes of video (testing).")
     args = parser.parse_args()
 
+    import cv2
+    from src.dashboard_io import write_camera_preview, write_pass_thumbnail, write_status
     from src.db import init_schema, list_passes, make_engine
     from src.live_events import LiveEventAssembler
     from src.live_pipeline import PassRecorder
@@ -174,7 +190,15 @@ def main():
 
     tracker = MultiCameraTracker(UltralyticsDetector(args.model, args.imgsz, args.conf))
     classifier = UltralyticsVehicleTypeClassifier()
-    recorder = PassRecorder(engine, jobs.put, source="replay" if replay else "live")
+    live_dir = Path(args.live_dir)
+
+    def save_thumbnail(uid, crop):
+        img = cv2.imread(crop.path)
+        if img is not None:
+            write_pass_thumbnail(uid, crop.camera, img, live_dir=live_dir)
+
+    recorder = PassRecorder(engine, jobs.put, source="replay" if replay else "live",
+                            thumbnail=save_thumbnail)
 
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -198,7 +222,9 @@ def main():
     open_cams = set(cameras)
     latest_t: dict[str, float] = {}
     frames_done, ocr_done, t_start = Counter(), 0, time.time()
-    next_update = next_status = 0.0
+    next_update = next_status = next_heartbeat = 0.0
+    next_preview: dict[str, float] = {}
+    pace_start = None                                 # (wall, video t) when pacing a replay
     pending_frames: dict[str, list] = {c: [] for c in cameras}
 
     def handle_results(block=False):
@@ -238,6 +264,13 @@ def main():
         if not batch:
             handle_results()
             continue
+        if replay and args.speed > 0:
+            t_video = min(sf.t for sf in batch)
+            if pace_start is None:
+                pace_start = (time.time(), t_video)
+            ahead = (t_video - pace_start[1]) / args.speed - (time.time() - pace_start[0])
+            if ahead > 0:
+                time.sleep(min(ahead, 1.0))
         if assembler is None and all(followers[c].reference for c in cameras):
             assembler = LiveEventAssembler(configs, {c: followers[c].reference for c in cameras})
         out = tracker.step(batch)
@@ -252,6 +285,13 @@ def main():
                     c = spool.save(sf.camera, d, sf.image)
                     if c is not None:
                         recorder.add_crop(c)
+            if time.time() >= next_preview.get(sf.camera, 0.0):
+                next_preview[sf.camera] = time.time() + args.preview_every_s
+                wall = assembler.wall(sf.camera, sf.t) if assembler else None
+                write_camera_preview(sf.camera, sf.image,
+                                     [(*d.box, f"#{d.track_id}") for d in dets],
+                                     live_dir=live_dir,
+                                     label=f"{sf.camera}  {wall:%H:%M:%S}" if wall else sf.camera)
             if assembler is None:
                 pending_frames[sf.camera].append((sf.t, dets))
             else:
@@ -265,6 +305,17 @@ def main():
                 recorder.on_update(assembler.update())
                 spool.remove(recorder.drop_crops_before(latest_t, keep_s=900))
         handle_results()
+        if time.time() >= next_heartbeat:
+            next_heartbeat = time.time() + 2.0
+            now = assembler.now() if assembler else None
+            write_status({"mode": "replay" if replay else "live",
+                          "source": str(hour) if replay else args.root,
+                          "video_time": now.isoformat() if now else None,
+                          "lag_s": (datetime.now() - now).total_seconds() if now and not replay else None,
+                          "speed": args.speed if replay else 1.0,
+                          "stalled": sorted(c for c, f in followers.items() if f.stalled),
+                          "ocr_pending": len(recorder.pending), "ocr_done": ocr_done,
+                          "updated": time.time()}, live_dir=live_dir)
         if time.time() >= next_status:
             next_status = time.time() + args.status_every_s
             now = assembler.now() if assembler else None

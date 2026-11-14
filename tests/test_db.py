@@ -340,3 +340,4 @@ class TestTruckPasses:
         from src.db import upsert_pass
         with pytest.raises(ValueError):
             upsert_pass(engine, self.profile(), status="done", source="live")
+        upsert_pass(engine, self.profile(), status="reading", source="live")

@@ -11,7 +11,9 @@ the database (src/db.py truck_passes):
   far), so a dashboard can show a truck while it is still in view. An
   event that was provisional and has disappeared (the assembler split or
   joined passes differently once more tracks ended) is deleted.
-- *Final* events are submitted for OCR (`submit(job)`; in
+- *Final* events get a thumbnail per camera (`thumbnail(uid, crop)`,
+  the largest crop, for the dashboard's profile card) and are submitted
+  for OCR (`submit(job)`; in
   scripts/run_live.py a separate process with PaddleOCR). OCR is the slow
   step, so it runs off the main loop.
 - When an OCR result comes back (`on_reads`), codes, plates and vehicle
@@ -59,7 +61,8 @@ class _Final:
 class PassRecorder:
     def __init__(self, engine, submit: Callable[[OcrJob], None], *, source: str = "live",
                  share_window_s: float = 180.0, keep_s: float = 1800.0,
-                 clock: Callable[[], float] = None):
+                 clock: Callable[[], float] = None,
+                 thumbnail: Optional[Callable[[str, SpooledCrop], None]] = None):
         import time
         self.engine = engine
         self.submit = submit
@@ -67,6 +70,7 @@ class PassRecorder:
         self.share_window_s = share_window_s
         self.keep_s = keep_s
         self.clock = clock or time.time
+        self.thumbnail = thumbnail
         self.types: dict[tuple[str, int], dict[int, FrameType]] = defaultdict(dict)
         self.crops: dict[tuple[str, int], list[SpooledCrop]] = defaultdict(list)
         self.provisional: dict[str, VehicleProfile] = {}
@@ -124,13 +128,22 @@ class PassRecorder:
             seen.add(uid)
             self.provisional.pop(uid, None)
             self.provisional_events.pop(uid, None)
-            # Until OCR is back the pass stays provisional, with its final passes and type.
+            # Until OCR is back the pass is "reading", with its final passes and type.
             p = build_profile(uid, e.entry_time, e.end, tuple(e.cameras),
                               vtype=self._vehicle_type(e, up.detections))
             self.finals[uid] = _Final(e, p)
-            self._write(p, "provisional")
+            self._write(p, "reading")
             self.pending[uid] = e
-            self.submit(OcrJob(uid, self._crops(e, up.detections)))
+            crops = self._crops(e, up.detections)
+            if self.thumbnail is not None:
+                # the largest crop per camera, saved before OCR deletes the crops
+                best: dict[str, SpooledCrop] = {}
+                for c in crops:
+                    if c.camera not in best or c.longest_side > best[c.camera].longest_side:
+                        best[c.camera] = c
+                for c in best.values():
+                    self.thumbnail(uid, c)
+            self.submit(OcrJob(uid, crops))
         for uid in [u for u in self.provisional if u not in seen]:
             del self.provisional[uid]                 # re-assembled differently
             self.provisional_events.pop(uid, None)

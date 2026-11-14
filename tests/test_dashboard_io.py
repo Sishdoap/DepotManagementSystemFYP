@@ -73,3 +73,35 @@ class TestFrameSharing:
         # At least some pixels along the box edge should be green (0, 255, 0).
         edge_pixels = img_back[30, 20:100]  # top edge
         assert (edge_pixels[:, 1] > 200).any(), "expected green pixels along bbox top edge"
+
+class TestLiveFiles:
+    """Files the live pipeline writes for the depot dashboard."""
+
+    def test_camera_preview_round_trip(self, tmp_path):
+        from src.dashboard_io import read_camera_preview, write_camera_preview
+        img = np.zeros((1440, 5120, 3), np.uint8)
+        write_camera_preview("557", img, [(100, 100, 900, 600, "#3")], live_dir=tmp_path,
+                             label="11:06:02")
+        data, mtime = read_camera_preview("557", live_dir=tmp_path)
+        assert data[:2] == b"\xff\xd8" and mtime is not None
+        from PIL import Image
+        import io
+        assert Image.open(io.BytesIO(data)).size == (1280, 360)
+        assert read_camera_preview("999", live_dir=tmp_path) == (None, None)
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_thumbnail_and_status(self, tmp_path):
+        from src.dashboard_io import (read_status, thumbnail_path, write_pass_thumbnail,
+                                      write_status)
+        p = write_pass_thumbnail("uid1", "561", np.zeros((900, 1800, 3), np.uint8), live_dir=tmp_path)
+        assert p == thumbnail_path("uid1", "561", live_dir=tmp_path) and p.exists()
+        assert read_status(live_dir=tmp_path) is None
+        write_status({"mode": "replay", "lag_s": 3.0}, live_dir=tmp_path)
+        assert read_status(live_dir=tmp_path) == {"mode": "replay", "lag_s": 3.0}
+
+    def test_mask_plate(self):
+        from src.dashboard_io import mask_plate
+        assert mask_plate("BQB7404") == "BQB•••4"
+        assert mask_plate("T/BF7421") == "T/BF•••1"
+        assert mask_plate("WDX7232A") == "WDX••••A"
+        assert mask_plate(None) == "—"

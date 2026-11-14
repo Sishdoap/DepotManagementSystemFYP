@@ -79,7 +79,7 @@ def test_provisional_then_final(engine):
     rec.on_update(LiveUpdate(finalized=[e], detections=dets(e)))
     assert len(jobs) == 1 and jobs[0].pass_uid == event_id(e)
     assert [c.frame for c in jobs[0].crops] == [5]           # only crops of kept detections
-    assert list_passes(engine)[0]["status"] == "provisional"  # until OCR is back
+    assert list_passes(engine)[0]["status"] == "reading"      # until OCR is back
 
     p = rec.on_reads(event_id(e), code_reads((A, "45G1", 6)))
     row = list_passes(engine)[0]
@@ -133,3 +133,15 @@ def test_old_crop_lists_dropped_unless_in_use(engine):
     rec.add_crop(stale)
     assert rec.drop_crops_before({"557": 1000.0}, keep_s=600) == [stale]
     assert rec.drop_crops_before({"557": 1000.0}, keep_s=600) == []
+
+
+def test_thumbnail_per_camera_is_the_largest_crop(engine):
+    shots = []
+    rec = PassRecorder(engine, lambda job: None, clock=lambda: 1.0,
+                       thumbnail=lambda uid, c: shots.append((uid, c.camera, c.frame)))
+    e = event(1, 0)
+    for frame, w in ((0, 700), (5, 900), (10, 800)):
+        rec.add_crop(SpooledCrop("557", 1, frame, frame / 4, (0, 0, w, 300), (0, 0), f"/{frame}.jpg"))
+    rec.add_crop(SpooledCrop("561", 1, 5, 1.25, (0, 0, 650, 300), (0, 0), "/c.jpg"))
+    rec.on_update(LiveUpdate(finalized=[e], detections=dets(e)))
+    assert sorted(shots) == [(event_id(e), "557", 5), (event_id(e), "561", 5)]

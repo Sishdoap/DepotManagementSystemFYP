@@ -110,16 +110,19 @@ sim_state = Table(
 # --- Real truck passes from the depot cameras (FYP2, M8: FR5/FR6) ---
 # The tables above model the simulated gate queue; these hold what the
 # cameras actually saw, one row per truck pass (src.profiles.VehicleProfile).
-# A pass is written while still "provisional" (live view) and rewritten when
+# A pass is written while still "provisional" (in view), as "reading" once the
+# truck has left and its crops are being read, and rewritten when
 # "final"; pass_uid (src.live_events.event_id) is stable across rewrites.
 # Plates are personal data: the database file stays out of git.
+
+PASS_STATUSES = ("provisional", "reading", "final")
 
 truck_passes = Table(
     "truck_passes",
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("pass_uid", String(64), nullable=False, unique=True),
-    Column("status", String(16), nullable=False),         # provisional | final
+    Column("status", String(16), nullable=False),         # provisional | reading | final
     Column("source", String(16), nullable=False),         # live | replay
     Column("entry_time", Float, nullable=False),          # unix ts, checkpoint time
     Column("end_time", Float, nullable=False),            # last seen on any camera
@@ -514,8 +517,8 @@ def upsert_pass(engine: Engine, profile, *, status: str, source: str,
     changes its codes (src.fusion.resolve_shared_codes). Its container rows
     are replaced in the same transaction.
     """
-    if status not in ("provisional", "final"):
-        raise ValueError(f"status must be provisional or final, got {status!r}")
+    if status not in PASS_STATUSES:
+        raise ValueError(f"status must be one of {PASS_STATUSES}, got {status!r}")
     values = dict(
         status=status, source=source,
         entry_time=profile.entry_time.timestamp(), end_time=profile.end_time.timestamp(),

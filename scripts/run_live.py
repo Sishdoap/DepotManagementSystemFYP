@@ -23,14 +23,20 @@ classifier share one CUDA context in the main process.
 
 With --replay <hour folder> the same pipeline runs over a finished hour
 as fast as the machine allows (demo fallback, and the check against the
-batch results). Live, it starts at the beginning of the file being
+batch results). --replay also takes several hour folders or whole day
+folders (`~/depot_recordings/2026-11-14`): each camera's files are played
+back to back with continuous time, so trucks crossing an hour boundary
+stay one pass and gaps (PC off) stay gaps — the multi-day run behind the
+FR7 arrival measurement (scripts/measure_arrivals.py). Live, it starts at the beginning of the file being
 written now, ~30 s before the present (--from-hour-start: from the
 beginning of that file, catching up at ~3.4x real time).
 
 Clock offsets: live recordings are stamped with the PC clock, measured
 within 1 s of the camera overlay (13 Nov), so live mode uses zero offsets
 unless --offsets-from points at an hour folder with a measured
-clock_offsets.yaml. --replay uses that hour's clock_offsets.yaml when present.
+clock_offsets.yaml. --replay of one hour uses that hour's clock_offsets.yaml
+when present; a multi-hour replay uses zero offsets like live mode (or
+--offsets-from).
 
 For the dashboard (scripts/depot_dashboard.py) it also writes, under
 --live-dir: a preview of each camera about once a second with the tracked
@@ -45,6 +51,8 @@ Usage:
     python scripts/run_live.py                                   # live
     python scripts/run_live.py --replay ~/depot_recordings/2026-11-13/1100 \
         --db sqlite:///results/recordings/2026-11-13_1100/live_replay.db
+    python scripts/run_live.py --replay ~/depot_recordings/2026-11-14 \
+        --db sqlite:///results/arrivals/2026-11-14.db --live-dir results/arrivals/live
 """
 
 import argparse
@@ -118,7 +126,9 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", default=str(Path.home() / "depot_recordings"),
                         help="Recorder output folder (live mode).")
-    parser.add_argument("--replay", default=None, help="Replay this finished hour folder instead.")
+    parser.add_argument("--replay", nargs="+", default=None,
+                        help="Replay finished recordings instead: one hour folder, or several "
+                             "hour/day folders played back to back.")
     parser.add_argument("--config", default="config/cameras.yaml")
     parser.add_argument("--offsets-from", default=None,
                         help="Hour folder whose clock_offsets.yaml to use in live mode.")
@@ -153,16 +163,29 @@ def main():
     from src.db import init_schema, list_passes, make_engine
     from src.live_events import LiveEventAssembler
     from src.live_pipeline import PassRecorder
-    from src.live_source import CameraFollower, camera_files
+    from src.live_source import CameraFollower, camera_files, replay_files
     from src.live_tracking import (CropSpool, MultiCameraTracker, UltralyticsDetector, frame_types,
                                    type_crops)
     from src.vehicle_type import UltralyticsVehicleTypeClassifier
 
     replay = args.replay is not None
     if replay:
-        hour = Path(args.replay).expanduser()
-        configs = load_camera_configs(args.config, videos_dir=hour)
-        files = find_recordings(hour)
+        folders = [Path(r).expanduser() for r in args.replay]
+        files = replay_files(folders)
+        if not files:
+            sys.exit(f"No recordings under {', '.join(map(str, folders))}")
+        if len(folders) == 1 and all(len(fs) == 1 for fs in files.values()):   # one hour
+            hour = folders[0]
+            configs = load_camera_configs(args.config, videos_dir=hour)
+        else:
+            hour = folders[0] if len(folders) == 1 else Path(f"{folders[0]} +{len(folders) - 1}")
+            configs = load_camera_configs(args.config, videos_dir=args.offsets_from)
+            if not args.offsets_from:
+                configs = {c: dataclasses.replace(cfg, clock_offsets=((0.0, 0.0),))
+                           for c, cfg in configs.items()}
+        first = min((fs[0] for fs in files.values()), key=lambda p: p.name.split("_", 1)[1])
+        last = max((fs[-1] for fs in files.values()), key=lambda p: p.name.split("_", 1)[1])
+        print(f"{sum(map(len, files.values()))} files, {first.name} .. {last.name}", flush=True)
     else:
         configs = load_camera_configs(args.config, videos_dir=args.offsets_from)
         if not args.offsets_from:
@@ -211,7 +234,7 @@ def main():
             if current:
                 skip = max(0.0, (datetime.now() - current[-1][0].started_at).total_seconds() - 30)
         f = CameraFollower(args.root, cam, live=not replay, sample_every=args.sample_every,
-                           files=[files[cam]] if replay else None, skip_s=skip)
+                           files=files[cam] if replay else None, skip_s=skip)
         followers[cam], queues[cam] = f, queue.Queue(maxsize=4)
         th = threading.Thread(target=decode, args=(f, queues[cam], stop), daemon=True)
         th.start()

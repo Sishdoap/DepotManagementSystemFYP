@@ -135,6 +135,30 @@ def test_old_crop_lists_dropped_unless_in_use(engine):
     assert rec.drop_crops_before({"557": 1000.0}, keep_s=600) == []
 
 
+def test_camera_tracks_written_with_the_pass(engine):
+    from src.db import list_pass_tracks
+    rec = recorder(engine, [])
+    e = event(1, 0)
+    rec.on_update(LiveUpdate(provisional=[e], detections=dets(e)))
+    got = list_pass_tracks(engine, status=None)[event_id(e)]
+    assert [(r["camera"], r["track_id"]) for r in got] == [("561", 1), ("557", 1)]
+    assert got[0]["start"] == T0.timestamp() and got[0]["end"] == T0.timestamp() + 20
+    rec.on_update(LiveUpdate(finalized=[e], detections=dets(e)))
+    rec.on_reads(event_id(e), code_reads((A, "22G1", 4)))
+    assert len(list_pass_tracks(engine)[event_id(e)]) == 2       # final keeps them
+
+
+def test_types_of_old_tracks_without_crops_dropped(engine):
+    rec = recorder(engine, [])
+    e = event(1, 0)
+    rec.on_update(LiveUpdate(provisional=[e], detections=dets(e)))   # 557 track 1 in use
+    ft = FrameType("557", 0, {"truck": 1.0})
+    rec.add_types("557", {(1, 0): ft, (2, 0): ft, (3, 30_000): ft})
+    rec.drop_crops_before({"557": 1500.0}, keep_s=900, fps=20)
+    # track 2: 30 000 frames (1500 s at 20 fps) behind the newest, no crops, unused -> gone
+    assert set(k for k in rec.types if k[0] == "557") == {("557", 1), ("557", 3)}
+
+
 def test_thumbnail_per_camera_is_the_largest_crop(engine):
     shots = []
     rec = PassRecorder(engine, lambda job: None, clock=lambda: 1.0,

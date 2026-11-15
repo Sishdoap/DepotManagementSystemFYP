@@ -103,6 +103,25 @@ def camera_files(root, camera: str) -> list[tuple[RecordingInfo, Path]]:
     return sorted(out, key=lambda ip: ip[0].started_at)
 
 
+def replay_files(folders) -> dict[str, list[Path]]:
+    """{camera: files oldest first} under hour and/or day folders, for a multi-hour replay.
+
+    Unlike src.footage.find_recordings (one file per camera per folder), a
+    camera may have several files per folder: the hours of a day folder, or
+    two files in one hour after a reconnect. A file listed under two of the
+    folders counts once. Gaps between files (PC off) stay gaps: the
+    follower's time jumps with the next file's start.
+    """
+    found: dict[str, dict[Path, RecordingInfo]] = {}
+    for folder in folders:
+        for p in Path(folder).expanduser().rglob("cam*_*"):
+            info = parse_recording_name(p.name)
+            if info and p.suffix.lower() in VIDEO_SUFFIXES:
+                found.setdefault(info.camera, {})[p.resolve()] = info
+    return {cam: [p for p, _ in sorted(ps.items(), key=lambda pi: pi[1].started_at)]
+            for cam, ps in sorted(found.items())}
+
+
 @dataclass
 class SampledFrame:
     camera: str

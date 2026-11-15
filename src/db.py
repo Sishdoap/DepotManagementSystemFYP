@@ -11,6 +11,8 @@ Schema:
     truck_passes          — real truck passes from the depot cameras, one
                             vehicle profile each (FYP2 M8; src/profiles.py)
     pass_containers       — the 0-2 container codes of each pass
+    pass_tracks           — each pass's track on each camera, with times
+                            (arrivals and time at the barrier for FR7)
 """
 
 from __future__ import annotations
@@ -154,6 +156,21 @@ pass_containers = Table(
     Column("code", String(16), nullable=False),
     Index("ix_pass_containers_code", "code"),
     Index("ix_pass_containers_pass_id", "pass_id"),
+)
+
+# One row per camera track of a pass (src.events.CameraPass): when the truck
+# was in view on each camera. Gives the arrival on the first camera (waiting
+# included) and the time at the barrier (camera 561) for FR7.
+pass_tracks = Table(
+    "pass_tracks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("pass_id", Integer, ForeignKey("truck_passes.id", ondelete="CASCADE"), nullable=False),
+    Column("camera", String(8), nullable=False),
+    Column("track_id", Integer, nullable=False),
+    Column("start", Float, nullable=False),               # unix ts, first detection
+    Column("end", Float, nullable=False),                 # unix ts, last detection
+    Index("ix_pass_tracks_pass_id", "pass_id"),
 )
 
 
@@ -509,13 +526,17 @@ def get_sim_clock(engine: Engine) -> float | None:
 # --- Truck passes (FYP2) ---
 
 def upsert_pass(engine: Engine, profile, *, status: str, source: str,
-                updated_at: float | None = None) -> int:
+                updated_at: float | None = None, tracks=None) -> int:
     """Insert or rewrite one truck pass (a src.profiles.VehicleProfile). Returns its id.
 
     Keyed on `pass_uid`, so the live pipeline can write a provisional pass
     and overwrite it when it is final, or again when a neighbouring truck
     changes its codes (src.fusion.resolve_shared_codes). Its container rows
     are replaced in the same transaction.
+
+    `tracks`: the pass's camera tracks (src.events.CameraPass: camera,
+    track_id, start, end). When given they replace the stored ones; None
+    leaves them as they are.
     """
     if status not in PASS_STATUSES:
         raise ValueError(f"status must be one of {PASS_STATUSES}, got {status!r}")
@@ -545,6 +566,12 @@ def upsert_pass(engine: Engine, profile, *, status: str, source: str,
             conn.execute(pass_containers.delete().where(pass_containers.c.pass_id == pid))
         for i, code in enumerate(profile.codes):
             conn.execute(pass_containers.insert().values(pass_id=pid, position=i, code=code))
+        if tracks is not None:
+            conn.execute(pass_tracks.delete().where(pass_tracks.c.pass_id == pid))
+            for t in tracks:
+                conn.execute(pass_tracks.insert().values(
+                    pass_id=pid, camera=t.camera, track_id=int(t.track_id),
+                    start=t.start.timestamp(), end=t.end.timestamp()))
     return int(pid)
 
 
@@ -556,6 +583,7 @@ def delete_pass(engine: Engine, pass_uid: str) -> None:
         ).scalar()
         if pid is not None:
             conn.execute(pass_containers.delete().where(pass_containers.c.pass_id == pid))
+            conn.execute(pass_tracks.delete().where(pass_tracks.c.pass_id == pid))
             conn.execute(truck_passes.delete().where(truck_passes.c.id == pid))
 
 
@@ -574,6 +602,22 @@ def list_passes(engine: Engine, *, since: float | None = None, status: str | Non
         d = dict(r._mapping)
         d["codes"] = tuple((d["container_codes"] or "").split())
         out.append(d)
+    return out
+
+
+def list_pass_tracks(engine: Engine, *, status: str | None = "final") -> dict[str, list[dict]]:
+    """{pass_uid: [{camera, track_id, start, end}, ...]} ordered by start (FR7 timings)."""
+    q = (select(truck_passes.c.pass_uid, pass_tracks.c.camera, pass_tracks.c.track_id,
+                pass_tracks.c.start, pass_tracks.c.end)
+         .select_from(pass_tracks.join(truck_passes, pass_tracks.c.pass_id == truck_passes.c.id))
+         .order_by(truck_passes.c.pass_uid, pass_tracks.c.start))
+    if status is not None:
+        q = q.where(truck_passes.c.status == status)
+    out: dict[str, list[dict]] = {}
+    with transaction(engine) as conn:
+        for r in conn.execute(q).all():
+            d = dict(r._mapping)
+            out.setdefault(d.pop("pass_uid"), []).append(d)
     return out
 
 

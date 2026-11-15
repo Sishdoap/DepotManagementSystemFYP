@@ -103,13 +103,16 @@ class PassRecorder:
             out += [c for c in self.crops.get((p.camera, p.track_id), []) if c.frame in kept]
         return out
 
-    def _write(self, profile: VehicleProfile, status: str) -> None:
+    def _write(self, profile: VehicleProfile, status: str, event: Event) -> None:
+        """Upsert the pass with its camera tracks (pass_tracks: arrival and barrier times, FR7)."""
+        tracks = tuple((p.camera, p.track_id, p.start, p.end) for p in event.passes)
         state = (status, profile.codes, profile.vehicle_type, round(profile.vehicle_type_conf, 2),
                  profile.cameras, profile.plate, profile.trailer_plate, profile.end_time,
-                 tuple(profile.notes))
+                 tuple(profile.notes), tracks)
         if self.written.get(profile.pass_uid) == state:
             return
-        upsert_pass(self.engine, profile, status=status, source=self.source, updated_at=self.clock())
+        upsert_pass(self.engine, profile, status=status, source=self.source, updated_at=self.clock(),
+                    tracks=event.passes)
         self.written[profile.pass_uid] = state
 
     def on_update(self, up: LiveUpdate) -> None:
@@ -122,7 +125,7 @@ class PassRecorder:
                               vtype=self._vehicle_type(e, up.detections))
             self.provisional[uid] = p
             self.provisional_events[uid] = e
-            self._write(p, "provisional")
+            self._write(p, "provisional", e)
         for e in up.finalized:
             uid = event_id(e)
             seen.add(uid)
@@ -132,7 +135,7 @@ class PassRecorder:
             p = build_profile(uid, e.entry_time, e.end, tuple(e.cameras),
                               vtype=self._vehicle_type(e, up.detections))
             self.finals[uid] = _Final(e, p)
-            self._write(p, "reading")
+            self._write(p, "reading", e)
             self.pending[uid] = e
             crops = self._crops(e, up.detections)
             if self.thumbnail is not None:
@@ -171,7 +174,7 @@ class PassRecorder:
         for u, x in near.items():
             changed = refresh_codes(x.profile, x.code)
             if u == pass_uid or changed:
-                self._write(x.profile, "final")
+                self._write(x.profile, "final", x.event)
         self._prune()
         return f.profile
 
@@ -188,9 +191,19 @@ class PassRecorder:
                 self.types.pop((p.camera, p.track_id), None)
                 self.crops.pop((p.camera, p.track_id), None)
 
-    def drop_crops_before(self, t_by_camera: dict[str, float], keep_s: float) -> list[SpooledCrop]:
+    def drop_crops_before(self, t_by_camera: dict[str, float], keep_s: float,
+                          fps: float = 20.0) -> list[SpooledCrop]:
         """Crop lists of tracks whose newest crop is older than `keep_s` (video seconds) on
-        their camera and that no pending or provisional event uses; returns them for deletion."""
+        their camera and that no pending or provisional event uses; returns them for deletion.
+
+        Type entries of such tracks go too, including tracks that never got a
+        crop (boxes below the crop size): a track is old when its newest frame
+        is more than `keep_s` × `fps` frames behind the newest frame typed on
+        its camera (frame indexes run on across files and do not jump over a
+        recording gap, so they are compared with each other, not with video
+        time). Without this a day-long replay keeps every background track's
+        types.
+        """
         used = set()
         for e in list(self.pending.values()) + list(self.provisional_events.values()):
             used |= {(p.camera, p.track_id) for p in e.passes}
@@ -203,6 +216,14 @@ class PassRecorder:
             if t_by_camera[cam] - max(c.t for c in cs) > keep_s:
                 out += self.crops.pop(key)
                 self.types.pop(key, None)
+        newest: dict[str, int] = {}
+        for (cam, _), by_frame in self.types.items():
+            if by_frame:
+                newest[cam] = max(newest.get(cam, 0), max(by_frame))
+        for key in [k for k, by_frame in self.types.items()
+                    if k not in used and k not in self.crops and by_frame
+                    and newest[k[0]] - max(by_frame) > keep_s * fps]:
+            del self.types[key]
         return out
 
 

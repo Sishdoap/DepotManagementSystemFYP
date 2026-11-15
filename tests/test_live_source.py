@@ -15,7 +15,7 @@ if str(root_dir) not in sys.path:
 import av
 import numpy as np
 
-from src.live_source import CameraFollower, GrowingFile, camera_files
+from src.live_source import CameraFollower, GrowingFile, camera_files, replay_files
 
 
 def make_mkv(path, n_frames=40, fps=20):
@@ -94,6 +94,21 @@ def test_camera_files_sorted_and_filtered(tmp_path):
     (tmp_path / "2026-11-13" / "1100" / "cam558_2026-11-13_11-00-00.mkv").write_bytes(b"")
     (tmp_path / "2026-11-13" / "1100" / "notes.txt").write_bytes(b"")
     assert [p for _, p in camera_files(tmp_path, "557")] == [b, a]
+
+
+def test_replay_files_across_hour_and_day_folders(tmp_path):
+    a, b, c = names(tmp_path, 11, 12, 13)
+    extra = a.parent / "cam557_2026-11-13_11-40-05.mkv"         # reconnect within the hour
+    other = tmp_path / "2026-11-14" / "0000" / "cam558_2026-11-14_00-00-00.mkv"
+    other.parent.mkdir(parents=True)
+    for p in (a, b, c, extra, other):
+        p.write_bytes(b"")
+    (a.parent / "notes.txt").write_bytes(b"")
+    day = tmp_path / "2026-11-13"
+    # a day folder plus one of its hours again: each file once, oldest first
+    got = replay_files([day, b.parent, other.parent.parent])
+    assert got == {"557": [p.resolve() for p in (a, extra, b, c)], "558": [other.resolve()]}
+    assert replay_files([tmp_path / "missing"]) == {}
 
 
 def test_replay_samples_and_continuous_time(tmp_path):

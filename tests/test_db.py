@@ -336,6 +336,28 @@ class TestTruckPasses:
         delete_pass(engine, "b")
         assert [r["pass_uid"] for r in list_passes(engine)] == ["a"]
 
+    def test_tracks_stored_replaced_and_deleted(self, engine):
+        from datetime import datetime
+        from src.db import delete_pass, list_pass_tracks, upsert_pass
+        from src.events import CameraPass
+        t = datetime(2026, 11, 13, 11, 39, 0)
+        p = self.profile(uid="a")
+        tracks = [CameraPass("557", 3, t.replace(second=0), t.replace(second=40)),
+                  CameraPass("561", 7, t.replace(second=2), t.replace(second=30))]
+        upsert_pass(engine, p, status="provisional", source="replay", tracks=tracks)
+        assert list_pass_tracks(engine) == {}                      # finals only by default
+        got = list_pass_tracks(engine, status=None)["a"]
+        assert [(r["camera"], r["track_id"]) for r in got] == [("557", 3), ("561", 7)]
+        assert got[1]["end"] - got[1]["start"] == 28
+        # rewritten as final without tracks: the stored ones stay
+        upsert_pass(engine, p, status="final", source="replay")
+        assert len(list_pass_tracks(engine)["a"]) == 2
+        # with tracks: replaced
+        upsert_pass(engine, p, status="final", source="replay", tracks=tracks[1:])
+        assert [r["camera"] for r in list_pass_tracks(engine)["a"]] == ["561"]
+        delete_pass(engine, "a")
+        assert list_pass_tracks(engine, status=None) == {}
+
     def test_bad_status_rejected(self, engine):
         from src.db import upsert_pass
         with pytest.raises(ValueError):

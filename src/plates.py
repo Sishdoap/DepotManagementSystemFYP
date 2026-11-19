@@ -27,8 +27,9 @@ What the footage shows (2026-11-02):
 Plate format (Peninsular Malaysia, also covers most commercial plates):
     vehicle   1-3 letters, 1-4 digits, optional 1 letter   e.g. WDX7232, BQB7404
     trailer   "T/" + the same                               e.g. T/BF7421
-Accepted here: at least MIN_LETTERS letters and MIN_DIGITS digits (see
-the constants for why).
+Accepted here: at least MIN_LETTERS letters, and at least
+MIN_VEHICLE_DIGITS digits on a vehicle plate / MIN_DIGITS on a trailer
+plate (see the constants for why).
 Look-alike characters are fixed by position (digit part O->0, I->1, ...;
 letter part 0->Q, 8->B, ...) — the same type-forced idea as the container
 code reader — but at most one fix per plate (MAX_FIXES), and the letter
@@ -55,6 +56,16 @@ MAX_FIXES = 1
 # capacity plate reads as CU8E, partial reads give "BQ8".
 MIN_LETTERS = 2
 MIN_DIGITS = 3
+# Fleet numbers painted on the cab look like plates with 3 digits: SG328 and
+# XPS310 (12 Aug), SXS332/341/373/375 (13 Nov). On a bobtail they sit as low
+# in the truck box as a plate, so position does not separate them, and on
+# 13 Nov SXS332 out-voted the real plate (3 frames vs 2). Every vehicle
+# plate on the footage has 4 digits (10/10 labelled on 12 Aug, 13/13
+# readable on 13 Nov 11:00), so a vehicle plate needs 4. A genuine plate
+# with fewer digits (legal in Malaysia, not seen here) is then missed
+# rather than a fleet number reported. Trailer plates ("T/...") keep 3:
+# fleet numbers never carry the T/ prefix.
+MIN_VEHICLE_DIGITS = 4
 _TO_DIGIT = {"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "B": "8", "G": "6"}
 _TO_LETTER = {"0": "Q", "1": "I", "2": "Z", "5": "S", "8": "B", "6": "G", "4": "A"}
 # letters (no I/O) + digits + optional suffix letter
@@ -94,15 +105,21 @@ def normalise_plate(text: str) -> Optional[tuple[str, str]]:
 
     Every split into letters (1-3) + digits (1-4) + optional suffix letter
     is tried; the one needing the fewest look-alike fixes wins, ties going
-    to more letters and no suffix — so "SG328" stays SG328 rather than
-    becoming S6328, and "8QB7404" becomes BQB7404.
+    to more letters and no suffix — so "SG3281" stays SG3281 rather than
+    becoming S63281, and "8QB7404" becomes BQB7404.
+
+    The digit minimum is checked on that best reading, not on every split:
+    otherwise a look-alike fix turns a fleet number's last letter into a
+    digit (XPS310 -> XP5310, SXS375 -> SX5375) and it passes as a 4-digit
+    plate.
     """
     t = re.sub(r"[^A-Z0-9/]", "", text.upper())
     kind = VEHICLE
     if t.startswith("T/"):
         kind, t = TRAILER, t[2:]
     t = t.replace("/", "")
-    best = None                                  # (fixes, -letters, has_suffix, plate)
+    min_digits = MIN_DIGITS if kind == TRAILER else MIN_VEHICLE_DIGITS
+    best = None                          # (fixes, -letters, has_suffix, plate, n digits)
     for n in range(3, MIN_LETTERS - 1, -1):
         letters_raw, rest = t[:n], t[n:]
         options = [(rest, "")]
@@ -114,15 +131,16 @@ def normalise_plate(text: str) -> Optional[tuple[str, str]]:
             letters = "".join(_TO_LETTER.get(c, c) for c in letters_raw)
             digits = "".join(_TO_DIGIT.get(c, c) for c in digits_raw)
             plate = letters + digits + suffix
-            if not _PLATE_RE.match(plate) or not any(c.isalpha() for c in letters_raw):
+            if (not _PLATE_RE.match(plate) or not letters.isalpha() or not digits.isdigit()
+                    or not any(c.isalpha() for c in letters_raw)):
                 continue
             fixes = sum(a != b for a, b in zip(letters_raw + digits_raw, letters + digits))
             if fixes > MAX_FIXES:
                 continue
-            key = (fixes, -n, bool(suffix), plate)
+            key = (fixes, -n, bool(suffix), plate, len(digits))
             if best is None or key < best:
                 best = key
-    if best is None:
+    if best is None or best[4] < min_digits:
         return None
     return (("T/" if kind == TRAILER else "") + best[3], kind)
 

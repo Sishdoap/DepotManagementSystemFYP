@@ -17,3 +17,5 @@ CLAUDE.md
 .env
 .env.*
 /weights
+# live truck passes (plates = personal data)
+depot_passes.db*

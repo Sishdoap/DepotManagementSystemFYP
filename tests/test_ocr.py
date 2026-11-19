@@ -229,3 +229,46 @@ class TestErrorTypes:
                 assert result.raw_string[i].isdigit(), (
                     f"Position {i} should be digit, got '{result.raw_string[i]}'"
                 )
+
+class TestPaddleInit:
+    """`_init_paddle` passes the detection-size and GPU-memory caps through.
+
+    A fake `paddleocr` module stands in for the real one, so the test
+    checks the settings without loading Paddle or a GPU.
+    """
+
+    @pytest.fixture
+    def fake_paddleocr(self, monkeypatch):
+        import types
+        calls = []
+        module = types.ModuleType("paddleocr")
+        module.PaddleOCR = lambda **kwargs: calls.append(kwargs) or "paddle"
+        monkeypatch.setitem(sys.modules, "paddleocr", module)
+        # setenv first so teardown restores the variable the code under test sets.
+        monkeypatch.setenv("FLAGS_gpu_memory_limit_mb", "unset")
+        monkeypatch.delenv("FLAGS_gpu_memory_limit_mb")
+        return calls
+
+    def test_defaults_leave_full_resolution(self, fake_paddleocr):
+        import os
+        assert RealOCRAdapter._init_paddle(use_gpu=False) == "paddle"
+        kwargs = fake_paddleocr[0]
+        assert kwargs["device"] == "cpu"
+        assert "text_det_limit_side_len" not in kwargs
+        assert "FLAGS_gpu_memory_limit_mb" not in os.environ
+
+    def test_caps_are_applied(self, fake_paddleocr, monkeypatch):
+        import os
+        monkeypatch.delitem(sys.modules, "paddle", raising=False)
+        RealOCRAdapter._init_paddle(use_gpu=True, det_max_side=1920, gpu_mem_mb=4096)
+        kwargs = fake_paddleocr[0]
+        assert kwargs["device"] == "gpu"
+        assert kwargs["text_det_limit_type"] == "max"
+        assert kwargs["text_det_limit_side_len"] == 1920
+        assert os.environ["FLAGS_gpu_memory_limit_mb"] == "4096"
+
+    def test_warns_when_paddle_already_imported(self, fake_paddleocr, monkeypatch):
+        import types
+        monkeypatch.setitem(sys.modules, "paddle", types.ModuleType("paddle"))
+        with pytest.warns(UserWarning, match="gpu_mem_mb not applied"):
+            RealOCRAdapter._init_paddle(use_gpu=True, gpu_mem_mb=4096)

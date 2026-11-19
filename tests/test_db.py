@@ -285,3 +285,81 @@ class TestSchemaPortability:
         init_schema(engine)
         init_schema(engine)
         # If we got here, no exception.
+
+class TestTruckPasses:
+    """Real truck passes (FYP2 M8): upsert by pass_uid, containers replaced."""
+
+    @staticmethod
+    def profile(uid="20261113-113902_561_7", codes=("EMCU6461774",), plate="BQB7404"):
+        from datetime import datetime, timedelta
+        from src.profiles import VehicleProfile
+        t = datetime(2026, 11, 13, 11, 39, 2)
+        return VehicleProfile(uid, t, t + timedelta(seconds=50), ("561", "557"), codes=codes,
+                              code_status="verified", code_support=9, size_type="22G1",
+                              vehicle_type="container_carrier", vehicle_type_conf=0.9,
+                              plate=plate, plate_support=4, capacity_class="medium",
+                              notes=["code: also read: X"])
+
+    def test_insert_and_list(self, engine):
+        from src.db import list_passes, upsert_pass
+        pid = upsert_pass(engine, self.profile(), status="provisional", source="replay",
+                          updated_at=1.0)
+        rows = list_passes(engine)
+        assert len(rows) == 1 and rows[0]["id"] == pid
+        r = rows[0]
+        assert r["status"] == "provisional" and r["source"] == "replay"
+        assert r["codes"] == ("EMCU6461774",) and r["plate"] == "BQB7404"
+        assert r["cameras"] == "561 557" and r["notes"] == "code: also read: X"
+        assert r["end_time"] - r["entry_time"] == 50
+
+    def test_upsert_rewrites_same_pass(self, engine):
+        from src.db import list_passes, passes_with_code, upsert_pass
+        p = self.profile(codes=("EMCU6461774", "MSKU3398188"))
+        pid = upsert_pass(engine, p, status="provisional", source="live")
+        p.codes = ("EMCU6461774",)
+        assert upsert_pass(engine, p, status="final", source="live") == pid
+        rows = list_passes(engine)
+        assert len(rows) == 1 and rows[0]["status"] == "final"
+        assert rows[0]["codes"] == ("EMCU6461774",)
+        assert passes_with_code(engine, "MSKU3398188") == []
+        assert [r["pass_uid"] for r in passes_with_code(engine, "EMCU6461774")] == [p.pass_uid]
+
+    def test_filters_and_delete(self, engine):
+        from src.db import delete_pass, list_passes, upsert_pass
+        a = self.profile(uid="a")
+        b = self.profile(uid="b", codes=(), plate=None)
+        upsert_pass(engine, a, status="final", source="live")
+        upsert_pass(engine, b, status="provisional", source="live")
+        assert [r["pass_uid"] for r in list_passes(engine, status="final")] == ["a"]
+        assert list_passes(engine, status="provisional")[0]["codes"] == ()
+        assert list_passes(engine, since=a.entry_time.timestamp() + 1) == []
+        delete_pass(engine, "b")
+        assert [r["pass_uid"] for r in list_passes(engine)] == ["a"]
+
+    def test_tracks_stored_replaced_and_deleted(self, engine):
+        from datetime import datetime
+        from src.db import delete_pass, list_pass_tracks, upsert_pass
+        from src.events import CameraPass
+        t = datetime(2026, 11, 13, 11, 39, 0)
+        p = self.profile(uid="a")
+        tracks = [CameraPass("557", 3, t.replace(second=0), t.replace(second=40)),
+                  CameraPass("561", 7, t.replace(second=2), t.replace(second=30))]
+        upsert_pass(engine, p, status="provisional", source="replay", tracks=tracks)
+        assert list_pass_tracks(engine) == {}                      # finals only by default
+        got = list_pass_tracks(engine, status=None)["a"]
+        assert [(r["camera"], r["track_id"]) for r in got] == [("557", 3), ("561", 7)]
+        assert got[1]["end"] - got[1]["start"] == 28
+        # rewritten as final without tracks: the stored ones stay
+        upsert_pass(engine, p, status="final", source="replay")
+        assert len(list_pass_tracks(engine)["a"]) == 2
+        # with tracks: replaced
+        upsert_pass(engine, p, status="final", source="replay", tracks=tracks[1:])
+        assert [r["camera"] for r in list_pass_tracks(engine)["a"]] == ["561"]
+        delete_pass(engine, "a")
+        assert list_pass_tracks(engine, status=None) == {}
+
+    def test_bad_status_rejected(self, engine):
+        from src.db import upsert_pass
+        with pytest.raises(ValueError):
+            upsert_pass(engine, self.profile(), status="done", source="live")
+        upsert_pass(engine, self.profile(), status="reading", source="live")

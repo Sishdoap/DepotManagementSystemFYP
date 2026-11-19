@@ -36,7 +36,7 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.footage import Detection, group_into_passes, parse_recording_name, wall_clock
+from src.footage import Detection, find_recordings, group_into_passes, parse_recording_name, wall_clock
 
 
 # COCO classes a container truck can be detected as. Prime movers with a
@@ -122,9 +122,9 @@ def main():
                         help="Only scan the first N minutes of each video (for testing).")
     args = parser.parse_args()
 
-    videos = sorted(p for p in Path(args.videos_dir).glob("*.mp4") if parse_recording_name(p.name))
+    videos = sorted(find_recordings(args.videos_dir).values())
     if not videos:
-        sys.exit(f"No VLC recordings found in {args.videos_dir}/")
+        sys.exit(f"No recordings found in {args.videos_dir}/")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     by_camera = {parse_recording_name(p.name).camera: p for p in videos}

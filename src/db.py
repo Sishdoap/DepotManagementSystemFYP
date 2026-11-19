@@ -8,6 +8,11 @@ Schema:
     containers            — ISO 6346 code reads (1:1 nullable with events)
     vehicle_profiles      — MMR + ALPR results (1:1 nullable with events; FYP2)
     gate_throughput       — per-gate per-minute aggregates for the router
+    truck_passes          — real truck passes from the depot cameras, one
+                            vehicle profile each (FYP2 M8; src/profiles.py)
+    pass_containers       — the 0-2 container codes of each pass
+    pass_tracks           — each pass's track on each camera, with times
+                            (arrivals and time at the barrier for FR7)
 """
 
 from __future__ import annotations
@@ -102,6 +107,70 @@ sim_state = Table(
     metadata,
     Column("key", String(32), primary_key=True),
     Column("value", Float, nullable=False),
+)
+
+# --- Real truck passes from the depot cameras (FYP2, M8: FR5/FR6) ---
+# The tables above model the simulated gate queue; these hold what the
+# cameras actually saw, one row per truck pass (src.profiles.VehicleProfile).
+# A pass is written while still "provisional" (in view), as "reading" once the
+# truck has left and its crops are being read, and rewritten when
+# "final"; pass_uid (src.live_events.event_id) is stable across rewrites.
+# Plates are personal data: the database file stays out of git.
+
+PASS_STATUSES = ("provisional", "reading", "final")
+
+truck_passes = Table(
+    "truck_passes",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("pass_uid", String(64), nullable=False, unique=True),
+    Column("status", String(16), nullable=False),         # provisional | reading | final
+    Column("source", String(16), nullable=False),         # live | replay
+    Column("entry_time", Float, nullable=False),          # unix ts, checkpoint time
+    Column("end_time", Float, nullable=False),            # last seen on any camera
+    Column("cameras", String(64), nullable=False),        # e.g. "561 557 558 560"
+    Column("container_codes", String(32), nullable=True), # space-separated, main code first
+    Column("code_status", String(16), nullable=True),     # verified|recovered|inferred|failed
+    Column("code_support", Integer, nullable=True),
+    Column("size_type", String(4), nullable=True),
+    Column("vehicle_type", String(32), nullable=True),
+    Column("vehicle_type_conf", Float, nullable=True),
+    Column("plate", String(16), nullable=True),           # prime mover
+    Column("plate_support", Integer, nullable=True),
+    Column("trailer_plate", String(16), nullable=True),
+    Column("trailer_plate_support", Integer, nullable=True),
+    Column("make", String(32), nullable=True),
+    Column("capacity_class", String(16), nullable=True),  # light | medium | heavy | unknown
+    Column("notes", String(512), nullable=True),
+    Column("updated_at", Float, nullable=False),
+    Index("ix_truck_passes_entry_time", "entry_time"),
+    Index("ix_truck_passes_plate", "plate"),
+)
+
+pass_containers = Table(
+    "pass_containers",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("pass_id", Integer, ForeignKey("truck_passes.id", ondelete="CASCADE"), nullable=False),
+    Column("position", Integer, nullable=False),          # 0 = main code, 1 = second container
+    Column("code", String(16), nullable=False),
+    Index("ix_pass_containers_code", "code"),
+    Index("ix_pass_containers_pass_id", "pass_id"),
+)
+
+# One row per camera track of a pass (src.events.CameraPass): when the truck
+# was in view on each camera. Gives the arrival on the first camera (waiting
+# included) and the time at the barrier (camera 561) for FR7.
+pass_tracks = Table(
+    "pass_tracks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("pass_id", Integer, ForeignKey("truck_passes.id", ondelete="CASCADE"), nullable=False),
+    Column("camera", String(8), nullable=False),
+    Column("track_id", Integer, nullable=False),
+    Column("start", Float, nullable=False),               # unix ts, first detection
+    Column("end", Float, nullable=False),                 # unix ts, last detection
+    Index("ix_pass_tracks_pass_id", "pass_id"),
 )
 
 
@@ -452,6 +521,118 @@ def get_sim_clock(engine: Engine) -> float | None:
             select(sim_state.c.value).where(sim_state.c.key == "sim_now")
         ).first()
     return float(row.value) if row else None
+
+
+# --- Truck passes (FYP2) ---
+
+def upsert_pass(engine: Engine, profile, *, status: str, source: str,
+                updated_at: float | None = None, tracks=None) -> int:
+    """Insert or rewrite one truck pass (a src.profiles.VehicleProfile). Returns its id.
+
+    Keyed on `pass_uid`, so the live pipeline can write a provisional pass
+    and overwrite it when it is final, or again when a neighbouring truck
+    changes its codes (src.fusion.resolve_shared_codes). Its container rows
+    are replaced in the same transaction.
+
+    `tracks`: the pass's camera tracks (src.events.CameraPass: camera,
+    track_id, start, end). When given they replace the stored ones; None
+    leaves them as they are.
+    """
+    if status not in PASS_STATUSES:
+        raise ValueError(f"status must be one of {PASS_STATUSES}, got {status!r}")
+    values = dict(
+        status=status, source=source,
+        entry_time=profile.entry_time.timestamp(), end_time=profile.end_time.timestamp(),
+        cameras=" ".join(profile.cameras), container_codes=" ".join(profile.codes) or None,
+        code_status=profile.code_status, code_support=profile.code_support,
+        size_type=profile.size_type, vehicle_type=profile.vehicle_type,
+        vehicle_type_conf=profile.vehicle_type_conf, plate=profile.plate,
+        plate_support=profile.plate_support, trailer_plate=profile.trailer_plate,
+        trailer_plate_support=profile.trailer_plate_support, make=profile.make,
+        capacity_class=profile.capacity_class,
+        notes=("; ".join(profile.notes))[:512] or None,
+        updated_at=updated_at if updated_at is not None else time.time(),
+    )
+    with transaction(engine) as conn:
+        pid = conn.execute(
+            select(truck_passes.c.id).where(truck_passes.c.pass_uid == profile.pass_uid)
+        ).scalar()
+        if pid is None:
+            pid = conn.execute(
+                truck_passes.insert().values(pass_uid=profile.pass_uid, **values)
+            ).inserted_primary_key[0]
+        else:
+            conn.execute(truck_passes.update().where(truck_passes.c.id == pid).values(**values))
+            conn.execute(pass_containers.delete().where(pass_containers.c.pass_id == pid))
+        for i, code in enumerate(profile.codes):
+            conn.execute(pass_containers.insert().values(pass_id=pid, position=i, code=code))
+        if tracks is not None:
+            conn.execute(pass_tracks.delete().where(pass_tracks.c.pass_id == pid))
+            for t in tracks:
+                conn.execute(pass_tracks.insert().values(
+                    pass_id=pid, camera=t.camera, track_id=int(t.track_id),
+                    start=t.start.timestamp(), end=t.end.timestamp()))
+    return int(pid)
+
+
+def delete_pass(engine: Engine, pass_uid: str) -> None:
+    """Remove a pass (a provisional event that never became final, e.g. split differently)."""
+    with transaction(engine) as conn:
+        pid = conn.execute(
+            select(truck_passes.c.id).where(truck_passes.c.pass_uid == pass_uid)
+        ).scalar()
+        if pid is not None:
+            conn.execute(pass_containers.delete().where(pass_containers.c.pass_id == pid))
+            conn.execute(pass_tracks.delete().where(pass_tracks.c.pass_id == pid))
+            conn.execute(truck_passes.delete().where(truck_passes.c.id == pid))
+
+
+def list_passes(engine: Engine, *, since: float | None = None, status: str | None = None,
+                limit: int = 100) -> list[dict]:
+    """Truck passes, newest first, as dicts (container_codes split into `codes`)."""
+    q = select(truck_passes).order_by(truck_passes.c.entry_time.desc()).limit(limit)
+    if since is not None:
+        q = q.where(truck_passes.c.entry_time >= since)
+    if status is not None:
+        q = q.where(truck_passes.c.status == status)
+    with transaction(engine) as conn:
+        rows = conn.execute(q).all()
+    out = []
+    for r in rows:
+        d = dict(r._mapping)
+        d["codes"] = tuple((d["container_codes"] or "").split())
+        out.append(d)
+    return out
+
+
+def list_pass_tracks(engine: Engine, *, status: str | None = "final") -> dict[str, list[dict]]:
+    """{pass_uid: [{camera, track_id, start, end}, ...]} ordered by start (FR7 timings)."""
+    q = (select(truck_passes.c.pass_uid, pass_tracks.c.camera, pass_tracks.c.track_id,
+                pass_tracks.c.start, pass_tracks.c.end)
+         .select_from(pass_tracks.join(truck_passes, pass_tracks.c.pass_id == truck_passes.c.id))
+         .order_by(truck_passes.c.pass_uid, pass_tracks.c.start))
+    if status is not None:
+        q = q.where(truck_passes.c.status == status)
+    out: dict[str, list[dict]] = {}
+    with transaction(engine) as conn:
+        for r in conn.execute(q).all():
+            d = dict(r._mapping)
+            out.setdefault(d.pop("pass_uid"), []).append(d)
+    return out
+
+
+def passes_with_code(engine: Engine, code: str) -> list[dict]:
+    """Every pass that carried container `code` (e.g. in at the gate, out later)."""
+    with transaction(engine) as conn:
+        rows = conn.execute(
+            select(truck_passes.c.pass_uid, truck_passes.c.entry_time, truck_passes.c.status,
+                   truck_passes.c.plate, pass_containers.c.position)
+            .select_from(pass_containers.join(truck_passes,
+                                              pass_containers.c.pass_id == truck_passes.c.id))
+            .where(pass_containers.c.code == code)
+            .order_by(truck_passes.c.entry_time)
+        ).all()
+    return [dict(r._mapping) for r in rows]
 
 
 # --- Query helpers (for the dashboard) ---

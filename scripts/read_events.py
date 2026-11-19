@@ -46,7 +46,7 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 from src.events import extract_events
-from src.footage import crop_box, load_camera_configs, load_tracks_csv, parse_recording_name
+from src.footage import crop_box, find_recordings, load_camera_configs, load_tracks_csv, parse_recording_name
 
 ROTATIONS = (0, 90, 180, 270)
 READ_ROLES = ("side", "codes", "backup")
@@ -66,11 +66,14 @@ def main():
                         help="Only read these cameras; existing rows for other cameras are kept.")
     parser.add_argument("--min-box-px", type=float, default=600)
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--det-max-side", type=int, default=1920,
+                        help="Cap on the text-detection image size; 0 = full resolution.")
+    parser.add_argument("--gpu-mem-mb", type=int, default=6144,
+                        help="Cap on PaddleOCR's GPU memory; 0 = no cap.")
     args = parser.parse_args()
 
-    configs = load_camera_configs(args.config)
-    videos = {info.camera: p for p in Path(args.videos_dir).glob("*.mp4")
-              if (info := parse_recording_name(p.name))}
+    configs = load_camera_configs(args.config, videos_dir=args.videos_dir)
+    videos = find_recordings(args.videos_dir)
     infos = {cam: parse_recording_name(p.name) for cam, p in videos.items()}
     ex = extract_events(load_tracks_csv(args.tracks), configs, infos)
     read_cams = [c for c in ex.chain if configs[c].role in READ_ROLES
@@ -98,7 +101,9 @@ def main():
     from src.iso6346_recovery import read_container_code
     from src.ocr import RealOCRAdapter
 
-    ocr = RealOCRAdapter(paddle_gpu=not args.cpu, use_localization=False)
+    ocr = RealOCRAdapter(paddle_gpu=not args.cpu, use_localization=False,
+                         det_max_side=args.det_max_side or None,
+                         gpu_mem_mb=args.gpu_mem_mb or None)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -11,7 +11,9 @@ again:
 2. Fusion: per event, fuses the frames (best rotation per frame) per
    camera (multi-frame) and over all cameras (cross-camera) with
    src.fusion.MultiContainerFuser (two codes on a 2x20 ft truck,
-   space-separated in the code columns).
+   space-separated in the code columns), then src.fusion.
+   resolve_shared_codes so a container caught from a neighbouring truck
+   is not listed on two trucks.
 
 Codes here are predictions; nothing is scored against ground truth until
 the M3 labels exist (M4).
@@ -27,6 +29,7 @@ import argparse
 import csv
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 current_dir = Path(__file__).resolve().parent
@@ -35,7 +38,8 @@ root_dir = current_dir.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from src.fusion import FrameRead, MultiContainerFuser, best_reading, load_frame_reads
+from src.fusion import (FrameRead, MultiContainerFuser, StatusWeightedVoteFuser, best_reading,
+                        load_frame_reads, resolve_shared_codes)
 from src.iso6346_recovery import STATUS_RANK, RECOVERED
 
 ROTATIONS = (0, 90, 180, 270)
@@ -61,9 +65,12 @@ def main():
     parser.add_argument("--reads", default="results/events/reads.csv")
     parser.add_argument("--events", default="results/events/events.csv")
     parser.add_argument("--out", default="results/events/fused.csv")
+    parser.add_argument("--min-support", type=int, default=None,
+                        help="Frames a code needs whatever its status (default: the fuser's).")
     args = parser.parse_args()
 
-    fuser = MultiContainerFuser()
+    fuser = (MultiContainerFuser() if args.min_support is None else
+             MultiContainerFuser(StatusWeightedVoteFuser(min_support=args.min_support)))
     by_frame = load_frame_reads(args.reads)
     cameras = sorted({cam for _, cam, _ in by_frame})
     with open(args.events) as f:
@@ -96,21 +103,31 @@ def main():
               + ", ".join(f"{rot}°: {wins[rot]}" for rot in ROTATIONS))
 
     # --- 2. fusion per event ---------------------------------------------------
+    # Fuse every event per scope first, then give each container to one
+    # truck among trucks close in time (src.fusion.resolve_shared_codes).
     scopes = cameras + ["all"]
+    times = {ev: datetime.fromisoformat(events[ev]["entry_time"]) for ev in events}
+    fused = {}
+    for scope in scopes:
+        per_event = {}
+        for ev in sorted(events):
+            frames = ([r for cam in cameras for r in best.get((ev, cam), [])] if scope == "all"
+                      else best.get((ev, scope), []))
+            per_event[ev] = (fuser.fuse(frames), bool(frames))
+        resolve_shared_codes({ev: out for ev, (out, _) in per_event.items()}, times)
+        fused[scope] = per_event
+
     rows = []
     for ev in sorted(events):
         row = {"event": ev, "entry_time": events[ev]["entry_time"], "cameras": events[ev]["cameras"]}
-        all_frames = []
         for cam in cameras:
             frames = best.get((ev, cam), [])
-            all_frames += frames
             row[f"{cam}_frames"] = len(frames)
             row[f"{cam}_frames_validated"] = sum(validated(r) for r in frames)
         for scope in scopes:
-            frames = all_frames if scope == "all" else best.get((ev, scope), [])
-            out = fuser.fuse(frames)
+            out, seen = fused[scope][ev]
             row[f"{scope}_code"] = " ".join(out.codes)     # two codes on a 2x20 ft truck
-            row[f"{scope}_status"] = out.status if frames else ""
+            row[f"{scope}_status"] = out.status if seen else ""
             row[f"{scope}_support"] = out.support
             row[f"{scope}_size_type"] = out.size_type or ""
             row[f"{scope}_note"] = out.note

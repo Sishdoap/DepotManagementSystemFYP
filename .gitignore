@@ -19,3 +19,4 @@ CLAUDE.md
 /weights
 # live truck passes (plates = personal data)
 depot_passes.db*
+/datasets

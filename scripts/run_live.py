@@ -44,11 +44,19 @@ boxes, a thumbnail per camera of every finished truck, and a status file.
 `--replay <hour> --speed 1` plays a recorded hour at real-time pace — the
 demo fallback when the streams are down.
 
+With --rtsp the pipeline reads the camera streams directly
+(src.live_source.StreamFollower, URLs from .env — the login is never
+printed): no recorder and nothing written to disk except crops, previews
+and the database. Added after recording stopped (2026-11-17, the disk WSL
+lives on hung under 24/7 recording). Times are the PC clock at connection
+plus stream timestamps, so offsets are zero as in file-following live mode.
+
 The database file (default depot_passes.db; not depot_live.db, which the
 gate simulator wipes) holds plates and stays out of git.
 
 Usage:
-    python scripts/run_live.py                                   # live
+    python scripts/run_live.py                                   # live, following the recorder
+    python scripts/run_live.py --rtsp                            # live, straight from the streams
     python scripts/run_live.py --replay ~/depot_recordings/2026-11-13/1100 \
         --db sqlite:///results/recordings/2026-11-13_1100/live_replay.db
     python scripts/run_live.py --replay ~/depot_recordings/2026-11-14 \
@@ -129,6 +137,12 @@ def main():
     parser.add_argument("--replay", nargs="+", default=None,
                         help="Replay finished recordings instead: one hour folder, or several "
                              "hour/day folders played back to back.")
+    parser.add_argument("--rtsp", action="store_true",
+                        help="Live straight from the camera streams in --env (no recorder needed).")
+    parser.add_argument("--env", default=str(root_dir / ".env"),
+                        help="File with RTSP_CAM_<n>=rtsp://... lines (--rtsp).")
+    parser.add_argument("--connect-wait-s", type=float, default=60.0,
+                        help="--rtsp: go on without cameras that have not connected by then.")
     parser.add_argument("--config", default="config/cameras.yaml")
     parser.add_argument("--offsets-from", default=None,
                         help="Hour folder whose clock_offsets.yaml to use in live mode.")
@@ -167,7 +181,8 @@ def main():
     from src.db import init_schema, list_passes, make_engine
     from src.live_events import LiveEventAssembler
     from src.live_pipeline import PassRecorder
-    from src.live_source import CameraFollower, camera_files, replay_files
+    from src.live_source import CameraFollower, StreamFollower, camera_files, replay_files
+    from src.recording import load_stream_urls
     from src.live_tracking import (CropSpool, MultiCameraTracker, UltralyticsDetector, frame_makes,
                                    frame_types, type_crops)
     from src.truck_make import UltralyticsTruckMakeClassifier
@@ -197,11 +212,17 @@ def main():
             configs = {c: dataclasses.replace(cfg, clock_offsets=((0.0, 0.0),))
                        for c, cfg in configs.items()}
         files = {}
+    urls = {}
+    if args.rtsp and not replay:
+        urls = load_stream_urls(args.env)             # {port: url}; never printed
+        if not urls:
+            sys.exit(f"No RTSP_CAM_ lines in {args.env}")
     cameras = [c for c, cfg in configs.items() if cfg.role != "ignore"
-               and (not replay or c in files)]
+               and (not replay or c in files) and (not urls or c in urls)]
     roles = {c: configs[c].role for c in configs}
-    print(f"{'Replaying ' + str(hour) if replay else 'Live from ' + args.root}: cameras "
-          f"{', '.join(cameras)}", flush=True)
+    source = ("Replaying " + str(hour) if replay
+              else "Live from the camera streams" if urls else "Live from " + args.root)
+    print(f"{source}: cameras {', '.join(cameras)}", flush=True)
 
     engine = make_engine(args.db)
     init_schema(engine)
@@ -241,6 +262,13 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     followers, queues, threads = {}, {}, []
     for cam in cameras:
+        if urls:
+            f = StreamFollower(cam, urls[cam], sample_every=args.sample_every)
+            followers[cam], queues[cam] = f, queue.Queue(maxsize=4)
+            th = threading.Thread(target=decode, args=(f, queues[cam], stop), daemon=True)
+            th.start()
+            threads.append(th)
+            continue
         skip = 0.0
         if not replay and not args.from_hour_start:
             current = camera_files(args.root, cam)
@@ -308,7 +336,19 @@ def main():
             ahead = (t_video - pace_start[1]) / args.speed - (time.time() - pace_start[0])
             if ahead > 0:
                 time.sleep(min(ahead, 1.0))
-        if assembler is None and all(followers[c].reference for c in cameras):
+        if (assembler is None and urls and time.time() - t_start > args.connect_wait_s
+                and not all(followers[c].reference for c in cameras)):
+            # a camera that never connected must not hold up the others
+            dead = [c for c in cameras if not followers[c].reference]
+            print(f"No stream from camera(s) {', '.join(dead)} after {args.connect_wait_s:.0f} s "
+                  f"({', '.join(sorted({followers[c].last_error or '?' for c in dead}))}); "
+                  f"going on without them", flush=True)
+            for c in dead:
+                followers[c].stop()
+                open_cams.discard(c)
+                pending_frames.pop(c, None)
+            cameras = [c for c in cameras if c not in dead]
+        if assembler is None and cameras and all(followers[c].reference for c in cameras):
             assembler = LiveEventAssembler(configs, {c: followers[c].reference for c in cameras})
         out = tracker.step(batch)
         for sf in batch:
@@ -348,7 +388,7 @@ def main():
             next_heartbeat = time.time() + 2.0
             now = assembler.now() if assembler else None
             write_status({"mode": "replay" if replay else "live",
-                          "source": str(hour) if replay else args.root,
+                          "source": str(hour) if replay else "camera streams" if urls else args.root,
                           "video_time": now.isoformat() if now else None,
                           "lag_s": (datetime.now() - now).total_seconds() if now and not replay else None,
                           "speed": args.speed if replay else 1.0,

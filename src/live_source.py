@@ -31,6 +31,17 @@ When a camera stops delivering (stream down), `stalled` turns true after
 `skip_s` starts the first file that many seconds in (at the next keyframe,
 packets before it are not decoded): live mode starts near "now" instead of
 first catching up on the hour so far.
+
+`StreamFollower` is the other source: it reads a camera's RTSP stream
+directly (no recorder, nothing written to disk) and yields the same
+`SampledFrame`s. Added 2026-11-20 when recording stopped (the disk WSL
+lives on hung twice under 24/7 recording). It holds one camera connection
+per camera — the NVR has so far accepted it next to the user's snapshot
+recorder. Times come from the stream's packet timestamps, anchored to the
+wall clock when the connection opened, so cameras share one clock (no
+per-recording clock offsets) and decoding delay does not stretch time. On
+a dropped connection it reconnects with a back-off; the time jumps over
+the gap like a gap between recorded files.
 """
 
 from __future__ import annotations
@@ -244,3 +255,95 @@ class CameraFollower:
                 if not self.live:
                     return
                 time.sleep(self.poll_s)
+
+
+class StreamFollower:
+    """Sampled frames of one camera straight from its RTSP stream (or any FFmpeg source).
+
+    Same interface as CameraFollower (`frames()`, `reference`, `stalled`,
+    `stop()`), so run_live.py treats both alike. `reference.started_at` is
+    the wall-clock time the first connection opened; `t` is seconds since
+    then. The URL holds the camera login: it is never printed or logged
+    (`label` names the source in `SampledFrame.file`).
+    """
+
+    def __init__(self, camera: str, source: str, *, sample_every: int = 5, fps: float = 20.0,
+                 stall_s: float = 30.0, read_timeout_s: float = 10.0, retry_s: float = 5.0,
+                 max_retry_s: float = 60.0, decode_threads: int = 4,
+                 clock: Callable[[], datetime] = datetime.now,
+                 opener: Optional[Callable] = None, sleep: Callable[[float], None] = time.sleep):
+        self.camera, self.source = camera, source
+        self.sample_every, self.fps = sample_every, fps
+        self.stall_s, self.read_timeout_s = stall_s, read_timeout_s
+        self.retry_s, self.max_retry_s = retry_s, max_retry_s
+        self.decode_threads = decode_threads
+        self.clock, self.sleep = clock, sleep
+        self._opener = opener
+        self.reference: Optional[RecordingInfo] = None
+        self.stalled = False
+        self.reconnects = 0
+        self.last_error: Optional[str] = None     # exception type only (messages may hold the URL)
+        self._stopped = False
+        self.label = Path(f"stream-{camera}")
+
+    def stop(self) -> None:
+        self._stopped = True
+
+    def _open(self):
+        if self._opener is not None:
+            return self._opener(self.source)
+        import av
+        options = {}
+        if self.source.startswith("rtsp://"):
+            options = {"rtsp_transport": "tcp", "timeout": str(int(self.read_timeout_s * 1e6))}
+        return av.open(self.source, options=options, timeout=self.read_timeout_s)
+
+    def frames(self) -> Iterator[SampledFrame]:
+        """Yield sampled frames until stopped, reconnecting when the stream drops."""
+        running = 0
+        wait = self.retry_s
+        last_frame = self.clock()
+        while not self._stopped:
+            try:
+                container = self._open()
+            except Exception as e:                    # noqa: BLE001 — any open failure: retry
+                self.last_error = type(e).__name__
+                self.stalled = (self.clock() - last_frame).total_seconds() >= self.stall_s
+                self.sleep(wait)
+                wait = min(self.max_retry_s, wait * 2)
+                continue
+            opened = self.clock()
+            if self.reference is None:
+                self.reference = RecordingInfo(self.camera, opened)
+            base = (opened - self.reference.started_at).total_seconds()
+            try:
+                stream = container.streams.video[0]
+                stream.thread_type = "AUTO"
+                stream.codec_context.thread_count = self.decode_threads
+                pts0, idx = None, 0
+                for packet in container.demux(stream):
+                    if self._stopped:
+                        break
+                    for frame in packet.decode():
+                        ts = frame.pts if frame.pts is not None else packet.dts
+                        if ts is not None and pts0 is None:
+                            pts0 = ts
+                        rel = (float((ts - pts0) * stream.time_base)
+                               if ts is not None and pts0 is not None else idx / self.fps)
+                        self.stalled = False
+                        last_frame = self.clock()
+                        wait = self.retry_s
+                        if idx % self.sample_every == 0:
+                            yield SampledFrame(self.camera, base + rel, running,
+                                               frame.to_ndarray(format="bgr24"), self.label)
+                        idx += 1
+                        running += 1
+            except Exception as e:                    # noqa: BLE001 — dropped stream: reconnect
+                self.last_error = type(e).__name__
+            finally:
+                container.close()
+            if not self._stopped:
+                self.reconnects += 1
+                self.stalled = (self.clock() - last_frame).total_seconds() >= self.stall_s
+                self.sleep(wait)
+                wait = min(self.max_retry_s, wait * 2)

@@ -14,7 +14,8 @@ confidence threshold, classes and tracker config).
 Per tracked detection the frame processor also
 - classifies the vehicle type (src.vehicle_type, RGB crop = box + 10%)
   on cameras that are not ignored, when the box's short side is at least
-  `min_type_px` — the same frames scripts/classify_events.py uses;
+  `min_type_px` — the same frames scripts/classify_events.py uses — and,
+  on camera 561, the truck make from the same crops (src.truck_make);
 - saves the crop for OCR (`CropSpool`) when the box is big enough for
   codes or plates on that camera's role (src.live_ocr).
 
@@ -32,6 +33,7 @@ import numpy as np
 
 from .footage import Detection, crop_box
 from .live_ocr import CODE_ROLES, PLATE_ROLES, SpooledCrop
+from .truck_make import MAKE_CAMERAS, FrameMake
 from .vehicle_type import FrameType
 
 # COCO classes a container truck is detected as (as scripts/track_trucks.py).
@@ -156,3 +158,16 @@ def frame_types(classifier, camera: str, dets: Sequence[Detection],
     probs = classifier.predict_batch(list(crops_rgb))
     return {(d.track_id, d.frame): FrameType(camera, d.frame, p, d.longest_side)
             for d, p in zip(dets, probs)}
+
+
+def frame_makes(classifier, camera: str, dets: Sequence[Detection],
+                crops_rgb: Sequence[np.ndarray]) -> dict[tuple[int, int], FrameMake]:
+    """{(track id, frame): FrameMake} on the make cameras (561); {} elsewhere.
+
+    Same crops as the vehicle type (box + 10%, RGB), which is the make
+    model's training crop.
+    """
+    if not dets or camera not in MAKE_CAMERAS:
+        return {}
+    probs = classifier.predict_batch(list(crops_rgb))
+    return {(d.track_id, d.frame): FrameMake(camera, d.frame, p) for d, p in zip(dets, probs)}

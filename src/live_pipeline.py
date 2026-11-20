@@ -22,6 +22,10 @@ the database (src/db.py truck_passes):
   the last few minutes (src.fusion.resolve_shared_codes); a neighbour
   whose codes change is rewritten too.
 
+Truck make (src.truck_make), when a make classifier is given, comes from
+camera 561's frames the same way (`add_makes`) and is fused per truck once
+the vehicle type is known; without one, `make` stays None.
+
 Vehicle type is fused with cameras weighted equally (`per_camera=True`).
 That variant was chosen on the 12 Aug hour, which is the development set
 since the live streams arrived (see the brief), so using it on new days
@@ -41,6 +45,7 @@ from .fusion import FusedRead, resolve_shared_codes
 from .live_events import LiveUpdate, event_id
 from .live_ocr import EventReads, SpooledCrop, fuse_event
 from .profiles import VehicleProfile, build_profile, refresh_codes
+from .truck_make import FrameMake, TruckMakeClassifier, fuse_make
 from .vehicle_type import FrameType, fuse_vehicle_type
 
 
@@ -62,8 +67,11 @@ class PassRecorder:
     def __init__(self, engine, submit: Callable[[OcrJob], None], *, source: str = "live",
                  share_window_s: float = 180.0, keep_s: float = 1800.0,
                  clock: Callable[[], float] = None,
-                 thumbnail: Optional[Callable[[str, SpooledCrop], None]] = None):
+                 thumbnail: Optional[Callable[[str, SpooledCrop], None]] = None,
+                 make_model: Optional[TruckMakeClassifier] = None):
         import time
+        self.make_model = make_model                  # threshold + applicable types; None = no make
+        self.makes: dict[tuple[str, int], dict[int, FrameMake]] = defaultdict(dict)
         self.engine = engine
         self.submit = submit
         self.source = source
@@ -84,6 +92,10 @@ class PassRecorder:
         for (tid, frame), ft in types.items():
             self.types[(camera, tid)][frame] = ft
 
+    def add_makes(self, camera: str, makes: dict[tuple[int, int], FrameMake]) -> None:
+        for (tid, frame), fm in makes.items():
+            self.makes[(camera, tid)][frame] = fm
+
     def add_crop(self, crop: SpooledCrop) -> None:
         self.crops[(crop.camera, crop.track_id)].append(crop)
 
@@ -95,6 +107,23 @@ class PassRecorder:
             kept = {d.frame for d in detections.get((p.camera, p.track_id), [])}
             frames += [ft for f, ft in by_frame.items() if f in kept]
         return fuse_vehicle_type(frames, per_camera=True)
+
+    def _make(self, e: Event, detections, vehicle_type: str) -> Optional[str]:
+        """Fused make of the event's kept 561 frames; None without a make model or for a light vehicle."""
+        if self.make_model is None:
+            return None
+        frames = []
+        for p in e.passes:
+            by_frame = self.makes.get((p.camera, p.track_id), {})
+            kept = {d.frame for d in detections.get((p.camera, p.track_id), [])}
+            frames += [fm for f, fm in by_frame.items() if f in kept]
+        return fuse_make(frames, vehicle_type, threshold=self.make_model.unknown_threshold,
+                         applies_to=self.make_model.applies_to_types).make
+
+    def _profile(self, uid: str, e: Event, detections):
+        vtype = self._vehicle_type(e, detections)
+        return build_profile(uid, e.entry_time, e.end, tuple(e.cameras), vtype=vtype,
+                             make=self._make(e, detections, vtype.vehicle_type))
 
     def _crops(self, e: Event, detections) -> list[SpooledCrop]:
         out = []
@@ -108,7 +137,7 @@ class PassRecorder:
         tracks = tuple((p.camera, p.track_id, p.start, p.end) for p in event.passes)
         state = (status, profile.codes, profile.vehicle_type, round(profile.vehicle_type_conf, 2),
                  profile.cameras, profile.plate, profile.trailer_plate, profile.end_time,
-                 tuple(profile.notes), tracks)
+                 tuple(profile.notes), tracks, profile.make)
         if self.written.get(profile.pass_uid) == state:
             return
         upsert_pass(self.engine, profile, status=status, source=self.source, updated_at=self.clock(),
@@ -121,8 +150,7 @@ class PassRecorder:
         for e in up.provisional:
             uid = event_id(e)
             seen.add(uid)
-            p = build_profile(uid, e.entry_time, e.end, tuple(e.cameras),
-                              vtype=self._vehicle_type(e, up.detections))
+            p = self._profile(uid, e, up.detections)
             self.provisional[uid] = p
             self.provisional_events[uid] = e
             self._write(p, "provisional", e)
@@ -132,8 +160,7 @@ class PassRecorder:
             self.provisional.pop(uid, None)
             self.provisional_events.pop(uid, None)
             # Until OCR is back the pass is "reading", with its final passes and type.
-            p = build_profile(uid, e.entry_time, e.end, tuple(e.cameras),
-                              vtype=self._vehicle_type(e, up.detections))
+            p = self._profile(uid, e, up.detections)
             self.finals[uid] = _Final(e, p)
             self._write(p, "reading", e)
             self.pending[uid] = e
@@ -163,7 +190,7 @@ class PassRecorder:
         f.code = code
         f.profile = build_profile(pass_uid, e.entry_time, e.end, tuple(e.cameras), code=code,
                                   plate=plate, trailer=trailer,
-                                  vtype=_FusedTypeView(vt_profile))
+                                  vtype=_FusedTypeView(vt_profile), make=vt_profile.make)
         # one container, one truck: among recently finalised trucks
         window = timedelta(seconds=self.share_window_s)
         near = {u: x for u, x in self.finals.items()
@@ -189,6 +216,7 @@ class PassRecorder:
             self.written.pop(u, None)
             for p in e.passes:
                 self.types.pop((p.camera, p.track_id), None)
+                self.makes.pop((p.camera, p.track_id), None)
                 self.crops.pop((p.camera, p.track_id), None)
 
     def drop_crops_before(self, t_by_camera: dict[str, float], keep_s: float,
@@ -216,6 +244,7 @@ class PassRecorder:
             if t_by_camera[cam] - max(c.t for c in cs) > keep_s:
                 out += self.crops.pop(key)
                 self.types.pop(key, None)
+                self.makes.pop(key, None)
         newest: dict[str, int] = {}
         for (cam, _), by_frame in self.types.items():
             if by_frame:
@@ -224,6 +253,7 @@ class PassRecorder:
                     if k not in used and k not in self.crops and by_frame
                     and newest[k[0]] - max(by_frame) > keep_s * fps]:
             del self.types[key]
+            self.makes.pop(key, None)
         return out
 
 

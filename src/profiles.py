@@ -7,7 +7,8 @@ A profile joins what the separate readers found for one checkpoint event:
     vehicle type      src.vehicle_type (fused over cameras)
     vehicle plate     src.plates  (prime mover)
     trailer plate     src.plates  ("T/..." on the trailer rear)
-    make              badge text (filled in later; None until then)
+    make              src.truck_make (camera 561; None for light vehicles
+                      or without a make model, "unknown" below threshold)
     capacity class    derived here, for the router (FR7)
 
 The record mirrors the "Collection" box of the haulier's consignment

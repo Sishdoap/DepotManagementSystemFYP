@@ -154,6 +154,10 @@ def main():
     parser.add_argument("--status-every-s", type=float, default=60.0)
     parser.add_argument("--from-hour-start", action="store_true",
                         help="Live: read the current hour from its start (default: from ~30 s ago).")
+    parser.add_argument("--make-weights", default="models/truck_make.pt",
+                        help="Truck make model (camera 561); skipped with a notice if missing.")
+    parser.add_argument("--make-card", default="models/truck_make_card.json")
+    parser.add_argument("--no-make", action="store_true", help="Do not predict truck make.")
     parser.add_argument("--max-minutes", type=float, default=None,
                         help="Replay: stop after this many minutes of video (testing).")
     args = parser.parse_args()
@@ -164,8 +168,9 @@ def main():
     from src.live_events import LiveEventAssembler
     from src.live_pipeline import PassRecorder
     from src.live_source import CameraFollower, camera_files, replay_files
-    from src.live_tracking import (CropSpool, MultiCameraTracker, UltralyticsDetector, frame_types,
-                                   type_crops)
+    from src.live_tracking import (CropSpool, MultiCameraTracker, UltralyticsDetector, frame_makes,
+                                   frame_types, type_crops)
+    from src.truck_make import UltralyticsTruckMakeClassifier
     from src.vehicle_type import UltralyticsVehicleTypeClassifier
 
     replay = args.replay is not None
@@ -213,6 +218,14 @@ def main():
 
     tracker = MultiCameraTracker(UltralyticsDetector(args.model, args.imgsz, args.conf))
     classifier = UltralyticsVehicleTypeClassifier()
+    make_model = None
+    if not args.no_make:
+        if Path(args.make_weights).exists() and Path(args.make_card).exists():
+            make_model = UltralyticsTruckMakeClassifier(args.make_weights, args.make_card)
+            print(f"Truck make: {', '.join(make_model.classes)} on camera 561 "
+                  f"(T={make_model.temperature:g}, unknown < {make_model.unknown_threshold:g})", flush=True)
+        else:
+            print(f"Truck make: no model at {args.make_weights} — make left empty", flush=True)
     live_dir = Path(args.live_dir)
 
     def save_thumbnail(uid, crop):
@@ -221,7 +234,7 @@ def main():
             write_pass_thumbnail(uid, crop.camera, img, live_dir=live_dir)
 
     recorder = PassRecorder(engine, jobs.put, source="replay" if replay else "live",
-                            thumbnail=save_thumbnail)
+                            thumbnail=save_thumbnail, make_model=make_model)
 
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -261,6 +274,7 @@ def main():
             ocr_done += 1
             print(f"  final {p.entry_time:%H:%M:%S} {' '.join(p.codes) or '-':24} "
                   f"{p.size_type or '-':5} {p.vehicle_type:17} {p.capacity_class:7} "
+                  f"{p.make or '-':16} "
                   f"plates {'yes' if p.plate else '-'}/{'yes' if p.trailer_plate else '-'} "
                   f"({reads.frames_read} frames, {info})", flush=True)
             if not block:
@@ -304,6 +318,8 @@ def main():
             if roles[sf.camera] != "ignore" and dets:
                 keep, crops = type_crops(sf.image, dets)
                 recorder.add_types(sf.camera, frame_types(classifier, sf.camera, keep, crops))
+                if make_model is not None:
+                    recorder.add_makes(sf.camera, frame_makes(make_model, sf.camera, keep, crops))
                 for d in dets:
                     c = spool.save(sf.camera, d, sf.image)
                     if c is not None:

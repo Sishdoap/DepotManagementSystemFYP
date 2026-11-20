@@ -169,3 +169,44 @@ def test_thumbnail_per_camera_is_the_largest_crop(engine):
     rec.add_crop(SpooledCrop("561", 1, 5, 1.25, (0, 0, 650, 300), (0, 0), "/c.jpg"))
     rec.on_update(LiveUpdate(finalized=[e], detections=dets(e)))
     assert sorted(shots) == [(event_id(e), "557", 5), (event_id(e), "561", 5)]
+
+
+class _MakeRule:
+    """What PassRecorder needs from a make model: threshold and applicable types."""
+    unknown_threshold = 0.5
+    applies_to_types = ("container_carrier", "tanker", "box_truck")
+
+
+def add_makes(rec, e, **p):
+    from src.truck_make import FrameMake
+    for x in e.passes:
+        rec.add_makes(x.camera, {(x.track_id, f): FrameMake(x.camera, f, dict(p)) for f in (0, 5, 10)})
+
+
+def test_make_fused_from_561_and_kept_through_ocr(engine):
+    rec = PassRecorder(engine, [].append, source="replay", clock=lambda: 1.0, make_model=_MakeRule())
+    e = event(1, 0)
+    add_types(rec, e)
+    add_makes(rec, e, scania=0.7, volvo=0.3)
+    rec.on_update(LiveUpdate(provisional=[e], detections=dets(e)))
+    rows = list_passes(engine)
+    assert rows[0]["make"] == "scania"
+    rec.on_update(LiveUpdate(finalized=[e], detections=dets(e)))
+    p = rec.on_reads(event_id(e), code_reads((A, "22G1", 4)))
+    assert p.make == "scania" and list_passes(engine)[0]["make"] == "scania"
+
+
+def test_no_make_without_model_or_for_light_vehicles(engine):
+    rec = recorder(engine, [])
+    e = event(1, 0)
+    add_types(rec, e)
+    add_makes(rec, e, scania=1.0)
+    rec.on_update(LiveUpdate(provisional=[e], detections=dets(e)))
+    assert list_passes(engine)[0]["make"] is None                      # no make model given
+    rec2 = PassRecorder(engine, [].append, clock=lambda: 1.0, make_model=_MakeRule())
+    e2 = event(2, 100)
+    add_types(rec2, e2, top="light_vehicle")
+    add_makes(rec2, e2, scania=1.0)
+    rec2.on_update(LiveUpdate(provisional=[e2], detections=dets(e2)))
+    row = {r["pass_uid"]: r for r in list_passes(engine)}[event_id(e2)]
+    assert row["vehicle_type"] == "light_vehicle" and row["make"] is None

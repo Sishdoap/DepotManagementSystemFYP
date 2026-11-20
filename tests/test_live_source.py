@@ -13,9 +13,10 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 import av
+import pytest
 import numpy as np
 
-from src.live_source import CameraFollower, GrowingFile, camera_files, replay_files
+from src.live_source import CameraFollower, GrowingFile, StreamFollower, camera_files, replay_files
 
 
 def make_mkv(path, n_frames=40, fps=20):
@@ -111,6 +112,13 @@ def test_replay_files_across_hour_and_day_folders(tmp_path):
     assert replay_files([tmp_path / "missing"]) == {}
 
 
+def test_replay_files_finds_vlc_recordings(tmp_path):
+    vlc = tmp_path / "vlc-record-2026-08-12-09h15m45s-rtsp___10.0.0.1_561_Streaming_Channels_101-.mp4"
+    vlc.write_bytes(b"")
+    (tmp_path / (vlc.name + ":Zone.Identifier")).write_bytes(b"")          # Windows download tag
+    assert replay_files([tmp_path]) == {"561": [vlc.resolve()]}
+
+
 def test_replay_samples_and_continuous_time(tmp_path):
     a, b = names(tmp_path, 11, 12)
     make_mkv(a, n_frames=40)
@@ -188,3 +196,38 @@ def test_skip_starts_at_a_keyframe_without_decoding_before(tmp_path):
     start = round(first_key * 20)
     assert got[0].frame == next(i for i in range(start, 40) if i % 5 == 0)   # sampled frames only
     assert [s.t for s in got] == [i / 20 for i in range(start, 40) if i % 5 == 0]
+
+
+def test_stream_follower_samples_reconnects_and_keeps_one_clock(tmp_path):
+    clip = tmp_path / "clip.mkv"
+    make_mkv(clip, n_frames=40)                                   # 2 s at 20 fps
+    clock = [datetime(2026, 11, 20, 15, 0, 0)]
+    opens = []
+
+    def opener(src):
+        opens.append(src)
+        if len(opens) == 2:
+            raise OSError("connection refused")                    # one failed reconnect
+        return av.open(str(clip))
+
+    f = None
+
+    def sleep(s):
+        clock[0] = clock[0].replace(second=clock[0].second + 10)  # time passes while down
+        if len(opens) >= 3:
+            f.stop()
+
+    f = StreamFollower("561", "rtsp://user:pw@10.0.0.1/x", sample_every=5, opener=opener,
+                       sleep=sleep, clock=lambda: clock[0], stall_s=15)
+    got = []
+    for sf in f.frames():
+        got.append(sf)
+        if len(got) == 8:
+            clock[0] = clock[0].replace(second=clock[0].second + 2)   # stream played 2 s
+    assert f.reference.started_at == datetime(2026, 11, 20, 15, 0, 0)
+    assert len(got) == 16 and f.reconnects >= 2
+    assert [round(s.t, 2) for s in got[:3]] == [0.0, 0.25, 0.5]
+    # second connection opened 2 + 10 + 10 s after the first: its frames start there
+    assert got[8].t == pytest.approx(22.0)
+    assert got[8].frame == 40 and str(got[8].file) == "stream-561"
+    assert f.last_error == "OSError" and "pw" not in repr(f.label)

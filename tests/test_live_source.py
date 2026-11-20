@@ -111,6 +111,13 @@ def test_replay_files_across_hour_and_day_folders(tmp_path):
     assert replay_files([tmp_path / "missing"]) == {}
 
 
+def test_replay_files_finds_vlc_recordings(tmp_path):
+    vlc = tmp_path / "vlc-record-2026-08-12-09h15m45s-rtsp___10.0.0.1_561_Streaming_Channels_101-.mp4"
+    vlc.write_bytes(b"")
+    (tmp_path / (vlc.name + ":Zone.Identifier")).write_bytes(b"")          # Windows download tag
+    assert replay_files([tmp_path]) == {"561": [vlc.resolve()]}
+
+
 def test_replay_samples_and_continuous_time(tmp_path):
     a, b = names(tmp_path, 11, 12)
     make_mkv(a, n_frames=40)

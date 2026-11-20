@@ -110,13 +110,16 @@ def replay_files(folders) -> dict[str, list[Path]]:
     camera may have several files per folder: the hours of a day folder, or
     two files in one hour after a reconnect. A file listed under two of the
     folders counts once. Gaps between files (PC off) stay gaps: the
-    follower's time jumps with the next file's start.
+    follower's time jumps with the next file's start. Both our own names
+    (cam558_…mkv) and the collaborator's VLC names (the 12 Aug hour) count.
     """
     found: dict[str, dict[Path, RecordingInfo]] = {}
     for folder in folders:
-        for p in Path(folder).expanduser().rglob("cam*_*"):
+        for p in Path(folder).expanduser().rglob("*"):
+            if p.suffix.lower() not in VIDEO_SUFFIXES or not p.is_file():
+                continue
             info = parse_recording_name(p.name)
-            if info and p.suffix.lower() in VIDEO_SUFFIXES:
+            if info:
                 found.setdefault(info.camera, {})[p.resolve()] = info
     return {cam: [p for p, _ in sorted(ps.items(), key=lambda pi: pi[1].started_at)]
             for cam, ps in sorted(found.items())}
